@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ehrcopilot"
+version = "0.1.0"
+description = "Governed Clinical-Analytics Copilot: NL→SQL agent over de-identified EHR data with 5-layer AST guardrails and abstention-DPO fine-tuning"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+readme = "README.md"
+dependencies = [
+    "sqlglot>=25.0.0",
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "datasets>=2.19.0",
+    "transformers>=4.45.0",
+    "torch>=2.3.0",
+    "accelerate>=0.30.0",
+    "huggingface-hub>=0.23.0",
+    "tqdm>=4.66.0",
+    "pandas>=2.2.0",
+]
+
+train = [
+    "transformers>=4.45.0",
+    "trl>=0.9.0",
+    "peft>=0.11.0",
+    "bitsandbytes>=0.43.0",
+    "accelerate>=0.30.0",
+    "torch>=2.3.0",
+    "unsloth>=2024.9",
+    "datasets>=2.19.0",
+    "huggingface-hub>=0.23.0",
+]
+
+serve = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "vllm>=0.5.0",
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+    "openinference-instrumentation-langchain>=0.1.0",
+    "arize-phoenix>=4.0.0",
+]
+
+agents = [
+    "langgraph>=0.2.0",
+    "langchain>=0.2.0",
+    "langchain-community>=0.2.0",
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+    "rank-bm25>=0.2.2",
+    "transformers>=4.45.0",
+    "torch>=2.3.0",
+    "openinference-instrumentation-langchain>=0.1.0",
+    "arize-phoenix>=4.0.0",
+]
+
+dev = [
+    "pytest>=8.2.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.0",
+    "httpx>=0.27.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ehrcopilot"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "T20"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src/ehrcopilot/guardrails/tests"]
+python_files = ["test_*.py", "*_test.py", "*_suite.py"]
+asyncio_mode = "auto"
+markers = [
+    "smoke: fast sanity checks (deselect with -m 'not smoke')",
+    "integration: end-to-end tests requiring the SQLite DB",
+]
+
+[tool.coverage.run]
+source = ["src/ehrcopilot"]
+omit = ["*/tests/*", "*/finetune/*"]

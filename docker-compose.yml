@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  ehrcopilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - EHRCOPILOT_MODEL=models/qwen25coder7b-ehrsql-awq
+      - EHRCOPILOT_K_THRESHOLD=11
+      - EHRCOPILOT_CACHE_THRESHOLD=0.90
+      - EHRCOPILOT_QUERY_TIMEOUT=10
+      - EHRCOPILOT_MAX_ROWS=1000
+      - PHOENIX_HOST=phoenix
+      - PHOENIX_PORT=6006
+    volumes:
+      - ./data:/app/data          # SQLite DB (mimic_iv_demo.db)
+      - ./models:/app/models      # AWQ quantized model
+      - ./cache:/app/cache        # ChromaDB persistent cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]   # RTX 5080 — inference node
+              capabilities: [gpu]
+    depends_on:
+      - phoenix
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+    volumes:
+      - phoenix_storage:/root/.phoenix
+    environment:
+      - PHOENIX_WORKING_DIR=/root/.phoenix
+
+volumes:
+  phoenix_storage:

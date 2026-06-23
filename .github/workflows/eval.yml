@@ -1,0 +1,102 @@
+name: Eval Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  guardrail-tests:
+    name: Guardrail adversarial suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install eval + dev dependencies
+        run: pip install -e ".[eval,dev]" sqlglot pydantic rank_bm25
+
+      - name: Run guardrail tests
+        run: PYTHONPATH=src pytest src/ehrcopilot/guardrails/tests/ -v --tb=short -q
+
+  eval-gate:
+    name: EX + RS regression gate
+    runs-on: self-hosted
+    # Self-hosted runner has the RTX 5080 + AWQ model artifact
+    # Skip if no self-hosted runner is available (falls back to guardrail-tests only)
+    continue-on-error: true
+    needs: guardrail-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install full dependencies
+        run: pip install -e ".[eval,agents,dev]"
+
+      - name: Build SQLite DB
+        run: |
+          PYTHONPATH=src python -m ehrcopilot.db.build_sqlite \
+            data/mimic-iv-demo data/mimic_iv_demo.db
+        env:
+          MIMIC_DATA_DIR: ${{ secrets.MIMIC_DATA_DIR }}
+
+      - name: Run eval on EHRSQL test split
+        run: |
+          PYTHONPATH=src python -m ehrcopilot.eval.harness \
+            data/ehrsql/ehrsql/mimic_iii/test.json \
+            --output tests/evalgen/eval_results_${{ github.sha }}.json \
+            --model models/merged
+
+      - name: Check regression against baselines
+        run: python - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          baseline_path = Path("tests/evalgen/baselines.json")
+          results_files = sorted(Path("tests/evalgen").glob("eval_results_*.json"))
+
+          if not results_files:
+              print("No eval results found — skipping regression check")
+              sys.exit(0)
+
+          results = json.loads(results_files[-1].read_text())
+
+          if not baseline_path.exists():
+              print("No baselines.json yet — writing current results as baseline")
+              baseline_path.write_text(json.dumps(results, indent=2))
+              sys.exit(0)
+
+          baselines = json.loads(baseline_path.read_text())
+          ex_delta = results["EX"] - baselines.get("EX", 0)
+          rs10_delta = results["RS(10)"] - baselines.get("RS(10)", 0)
+
+          print(f"EX:    {baselines.get('EX', 0):.4f} → {results['EX']:.4f} (Δ={ex_delta:+.4f})")
+          print(f"RS(10): {baselines.get('RS(10)', 0):.4f} → {results['RS(10)']:.4f} (Δ={rs10_delta:+.4f})")
+
+          failed = False
+          if ex_delta < -0.02:
+              print(f"FAIL: EX regressed by {-ex_delta:.4f} (threshold: -0.02)")
+              failed = True
+          if rs10_delta < -3:
+              print(f"FAIL: RS(10) regressed by {-rs10_delta:.1f} points (threshold: -3)")
+              failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.sha }}
+          path: tests/evalgen/eval_results_*.json

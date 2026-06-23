@@ -1,0 +1,8 @@
+{
+  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "note": "Populate these values after running the baseline eval with: python -m ehrcopilot.eval.harness data/ehrsql/ehrsql/mimic_iii/test.json --model Qwen/Qwen2.5-Coder-7B-Instruct",
+  "EX": 0.0,
+  "RS(0)": 0.0,
+  "RS(5)": 0.0,
+  "RS(10)": 0.0
+}

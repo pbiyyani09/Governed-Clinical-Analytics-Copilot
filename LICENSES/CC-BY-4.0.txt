@@ -1,0 +1,9 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+EHRSQL dataset is licensed under the Creative Commons Attribution 4.0 International License.
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Original work: EHRSQL — A Practical Text-to-SQL Benchmark for Electronic Health Records
+Authors: Gyubok Lee, Hyeonji Hwang, Seongsu Bae, Yeonsu Kwon, Woncheol Shin,
+         Seongjun Yang, Minjoon Seo, Jong-Yeup Kim, Edward Choi
+Source: https://github.com/glee4810/EHRSQL

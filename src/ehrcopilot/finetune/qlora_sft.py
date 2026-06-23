@@ -1,0 +1,122 @@
+"""QLoRA SFT fine-tuning of Qwen2.5-Coder-7B-Instruct on EHRSQL.
+
+Hardware: RTX 4080 Super (16 GB GDDR6X)
+Key settings adapted for 16 GB from the project plan:
+  - bs=1, effective batch=16 via gradient accumulation
+  - max_seq_length=1536 (down from 2048)
+  - Unsloth kernels for ~30% VRAM savings
+
+Usage:
+    python -m ehrcopilot.finetune.qlora_sft \
+        --data data/ehrsql/sft_train.jsonl \
+        --output checkpoints/sft
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", required=True, help="SFT JSONL data path")
+    parser.add_argument("--output", default="checkpoints/sft", help="Output dir")
+    parser.add_argument("--base-model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max-seq-length", type=int, default=1536)
+    args = parser.parse_args()
+
+    # Lazy imports — only loaded when actually training
+    try:
+        import torch
+        from unsloth import FastLanguageModel  # type: ignore[import]
+        from trl import SFTConfig, SFTTrainer  # type: ignore[import]
+        from datasets import Dataset  # type: ignore[import]
+    except ImportError as exc:
+        print(f"Training dependencies not installed: {exc}")
+        print("Install with: pip install -e '.[train]' unsloth")
+        sys.exit(1)
+
+    print(f"Loading base model: {args.base_model}")
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.base_model,
+        max_seq_length=args.max_seq_length,
+        dtype=torch.bfloat16,
+        load_in_4bit=True,
+    )
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=32,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+    )
+
+    print(f"Loading data from {args.data}")
+    raw_data = []
+    with open(args.data) as f:
+        for line in f:
+            raw_data.append(json.loads(line.strip()))
+
+    def _format_chat(example: dict) -> dict:
+        text = tokenizer.apply_chat_template(
+            example["messages"],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        return {"text": text}
+
+    dataset = Dataset.from_list(raw_data).map(_format_chat, remove_columns=["messages", "id", "is_answerable"])
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    training_args = SFTConfig(
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=16,
+        max_length=args.max_seq_length,
+        num_train_epochs=args.epochs,
+        learning_rate=2e-4,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.03,
+        optim="paged_adamw_8bit",
+        gradient_checkpointing=True,
+        bf16=True,
+        logging_steps=25,
+        save_steps=250,
+        output_dir=str(output_dir),
+        dataset_text_field="text",
+        report_to="none",
+    )
+
+    trainer = SFTTrainer(
+        model=model,
+        processing_class=tokenizer,
+        train_dataset=dataset,
+        args=training_args,
+    )
+
+    print("Starting SFT training...")
+    trainer.train()
+
+    adapter_path = output_dir / "adapter_final"
+    print(f"Saving adapter to {adapter_path}")
+    model.save_pretrained(str(adapter_path))
+    tokenizer.save_pretrained(str(adapter_path))
+    print("SFT training complete.")
+
+
+if __name__ == "__main__":
+    main()

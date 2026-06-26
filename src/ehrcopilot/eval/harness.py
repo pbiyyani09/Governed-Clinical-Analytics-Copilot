@@ -386,18 +386,24 @@ def run_hf_baseline(
     )
 
     import os as _os
-    is_local = (
+    use_unsloth = (
         _os.path.isdir(model_name)
         or model_name.startswith("./")
         or model_name.startswith("../")
         or model_name.startswith("/")
         or model_name.startswith("checkpoints/")
         or model_name.startswith("models/")
+        # Gemma 3 is a Gemma3ForConditionalGeneration checkpoint the plain
+        # text-generation pipeline can't load; route hub Gemma/Unsloth repos
+        # through Unsloth FastModel (which handles it).
+        or "gemma" in model_name.lower()
+        or model_name.startswith("unsloth/")
     )
 
-    if is_local:
-        # Load via Unsloth — works for LoRA adapters without bitsandbytes at forward time
-        from unsloth import FastLanguageModel  # type: ignore[import]
+    if use_unsloth:
+        # Gemma 3 is multimodal — load via Unsloth FastModel (handles LoRA adapters
+        # and full hub checkpoints; aliased to keep the call sites stable).
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,

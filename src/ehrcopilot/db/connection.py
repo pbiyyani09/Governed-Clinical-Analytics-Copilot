@@ -111,10 +111,36 @@ def execute_query(
         sqlite3.OperationalError: On any SQL execution error.
     """
     resolved_max_rows = max_rows if max_rows is not None else config.MAX_ROWS
+    resolved_timeout = timeout_seconds if timeout_seconds is not None else config.QUERY_TIMEOUT_SECONDS
 
-    with get_connection(db_path, timeout_seconds, resolved_max_rows) as conn:
-        cursor = conn.execute(sql)
-        rows = cursor.fetchmany(resolved_max_rows + 1)
+    with get_connection(db_path, resolved_timeout, resolved_max_rows) as conn:
+        # The progress handler in get_connection only fires between VDBE opcodes,
+        # so it cannot interrupt a query stuck inside a single long C operation
+        # (e.g. the sorter for an ORDER BY/GROUP BY/DISTINCT over a near-cartesian
+        # join — exactly what a hallucinated SQL query produces on chartevents).
+        # conn.interrupt() IS checked inside those loops, so a watchdog thread is
+        # the reliable hard wall-clock stop.
+        import threading
+        timed_out = threading.Event()
+
+        def _interrupt() -> None:
+            timed_out.set()
+            conn.interrupt()
+
+        watchdog = threading.Timer(resolved_timeout, _interrupt)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            cursor = conn.execute(sql)
+            rows = cursor.fetchmany(resolved_max_rows + 1)
+        except (sqlite3.OperationalError, QueryTimeoutError) as exc:
+            if timed_out.is_set() or "interrupt" in str(exc).lower():
+                raise QueryTimeoutError(
+                    f"Query exceeded {resolved_timeout}s wall-clock limit"
+                ) from exc
+            raise
+        finally:
+            watchdog.cancel()
 
         if len(rows) > resolved_max_rows:
             raise RowCapExceededError(

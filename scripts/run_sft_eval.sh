@@ -4,9 +4,12 @@
 # can find libnvJitLink.so.13 needed for 4-bit forward passes.
 #
 # Usage:
-#   bash scripts/run_sft_eval.sh [--output PATH] [--split PATH] [--adapter PATH] [--repair]
+#   bash scripts/run_sft_eval.sh [--output PATH] [--split PATH] [--adapter PATH]
+#                                [--repair] [--few-shot] [--retrieval-mode MODE]
 #
-# --repair  enables execution-guided repair loop (up to 3 retries per failed SQL)
+# --repair           enables execution-guided repair loop (up to 3 retries per failed SQL)
+# --few-shot         enables RAG few-shot retrieval (uses --retrieval-mode; default: bm25)
+# --retrieval-mode   bm25 (default) | embed | hybrid  (hybrid = BM25 + semantic RRF)
 # Default output: tests/evalgen/sft_results.json
 
 set -euo pipefail
@@ -34,6 +37,7 @@ TRAIN="data/ehrsql/ehrsql/mimic_iii/train.json"
 REPAIR_FLAG=""
 FEW_SHOT_FLAG=""
 NUM_SAMPLES_FLAG=""
+RETRIEVAL_MODE_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -43,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --repair) REPAIR_FLAG="--repair"; shift ;;
         --few-shot) FEW_SHOT_FLAG="--few-shot $TRAIN"; shift ;;
         --num-samples) NUM_SAMPLES_FLAG="--num-samples $2"; shift 2 ;;
+        --retrieval-mode) RETRIEVAL_MODE_FLAG="--retrieval-mode $2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -63,6 +68,7 @@ python3 -m ehrcopilot.eval.harness \
     --output "$OUTPUT" \
     $REPAIR_FLAG \
     $FEW_SHOT_FLAG \
+    $RETRIEVAL_MODE_FLAG \
     $NUM_SAMPLES_FLAG \
     2>&1 | tee logs/sft_eval.log
 

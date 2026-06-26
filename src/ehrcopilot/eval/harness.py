@@ -201,40 +201,124 @@ def load_ehrsql_split(split_path: Path) -> list[EHRSQLExample]:
 
 
 # ---------------------------------------------------------------------------
-# BM25 few-shot retriever (RAG)
+# RAG helpers
+# ---------------------------------------------------------------------------
+
+
+def _sql_skeleton(sql: str) -> str:
+    """Strip concrete values from SQL to expose the structural template.
+
+    Replaces string literals → '?' and integers → ?, leaving SQL keywords,
+    table/column names, and operators intact. This lets the embedding model
+    cluster survival-rate queries together regardless of disease name.
+    """
+    s = sql.lower()
+    s = re.sub(r"'[^']*'", "'?'", s)
+    s = re.sub(r'\b\d+\b', '?', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+_EMBED_MODEL_NAME = "BAAI/bge-large-en-v1.5"
+
+# ---------------------------------------------------------------------------
+# Hybrid few-shot retriever (BM25 + semantic embeddings via RRF)
 # ---------------------------------------------------------------------------
 
 
 def build_few_shot_retriever(
     train_path: Path,
     top_k: int = 2,
-    max_sql_chars: int = 120,
+    mode: str = "bm25",
+    embed_cache: "Path | None" = None,
 ) -> "Callable[[str], str]":
-    """Build a BM25 retriever over train examples.
+    """Build a few-shot retriever over train examples.
 
-    Returns a function (question) -> few_shot_block (str) ready to prepend
-    into the user message. Caps each SQL at max_sql_chars to stay within the
-    1536-token model context (schema uses ~630 tokens, leaving ~650 for
-    question + few-shot + 256 generation tokens).
+    mode:
+      "bm25"   — keyword BM25 only (default, backward-compatible)
+      "embed"  — semantic embedding only (BAAI/bge-large-en-v1.5, GPU if available)
+      "hybrid" — Reciprocal Rank Fusion of BM25 + embedding (best quality)
+
+    embed_cache: path to save/load precomputed .npy embeddings.
+      Auto-derived as <train_path.parent>/train_embeddings_bge_large.npy.
+
+    SQL is included in full — no truncation. The model context budget is managed
+    via max_prompt_length in the ORPOConfig / inference settings.
     """
+    import numpy as np
     from rank_bm25 import BM25Okapi  # type: ignore[import]
 
     examples = [e for e in load_ehrsql_split(train_path) if e.is_answerable and e.gold_sql]
-    tokenized = [e.question.lower().split() for e in examples]
-    bm25 = BM25Okapi(tokenized)
     gold_sqls = [_canonicalize_gold_sql(e.gold_sql) for e in examples]
     questions = [e.question for e in examples]
+    n = len(examples)
+
+    tokenized = [q.lower().split() for q in questions]
+    bm25 = BM25Okapi(tokenized)
+
+    embed_model = None
+    train_embeds = None
+
+    if mode in ("embed", "hybrid"):
+        import torch
+        from sentence_transformers import SentenceTransformer  # type: ignore[import]
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if embed_cache is None:
+            embed_cache = train_path.parent / "train_embeddings_bge_large.npy"
+
+        if embed_cache.exists():
+            print(f"Loading cached embeddings from {embed_cache}")
+            train_embeds = np.load(str(embed_cache))
+        else:
+            print(f"Computing train embeddings with {_EMBED_MODEL_NAME} on {device} ...")
+            _tmp = SentenceTransformer(_EMBED_MODEL_NAME, device=device)
+            index_texts = [
+                q + " " + _sql_skeleton(sql)
+                for q, sql in zip(questions, gold_sqls)
+            ]
+            train_embeds = _tmp.encode(
+                index_texts,
+                show_progress_bar=True,
+                batch_size=64,
+                normalize_embeddings=True,
+            )
+            np.save(str(embed_cache), train_embeds)
+            print(f"Embeddings saved to {embed_cache}")
+
+        embed_model = SentenceTransformer(_EMBED_MODEL_NAME, device=device)
+        print(f"Embedding model ready ({device})")
 
     def _retrieve(question: str) -> str:
-        scores = bm25.get_scores(question.lower().split())
-        top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        bm25_scores = bm25.get_scores(question.lower().split())
+
+        if mode == "bm25":
+            top_idx = list(map(int, (-bm25_scores).argsort()[:top_k]))
+        else:
+            assert embed_model is not None and train_embeds is not None
+            q_vec = embed_model.encode([question], normalize_embeddings=True)
+            cosine = (train_embeds @ q_vec.T).squeeze()
+
+            if mode == "embed":
+                top_idx = list(map(int, (-cosine).argsort()[:top_k]))
+            else:
+                # Hybrid: Reciprocal Rank Fusion
+                bm25_order = (-bm25_scores).argsort()
+                bm25_ranks = np.empty(n, dtype=np.float32)
+                bm25_ranks[bm25_order] = np.arange(1, n + 1, dtype=np.float32)
+
+                embed_order = (-cosine).argsort()
+                embed_ranks = np.empty(n, dtype=np.float32)
+                embed_ranks[embed_order] = np.arange(1, n + 1, dtype=np.float32)
+
+                rrf = 1.0 / (60 + bm25_ranks) + 1.0 / (60 + embed_ranks)
+                top_idx = list(map(int, (-rrf).argsort()[:top_k]))
+
         lines = ["Similar examples:"]
         for idx in top_idx:
-            sql = gold_sqls[idx]
-            if len(sql) > max_sql_chars:
-                sql = sql[:max_sql_chars] + "..."
             lines.append(f"Q: {questions[idx]}")
-            lines.append(f"SQL: {sql}")
+            lines.append(f"SQL: {gold_sqls[idx]}")
         return "\n".join(lines)
 
     return _retrieve
@@ -560,7 +644,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--few-shot", default=None, metavar="TRAIN_JSON",
-        help="Path to EHRSQL train.json; enables BM25 few-shot retrieval (top-2 similar examples per question)",
+        help="Path to EHRSQL train.json; enables few-shot retrieval (top-2 similar examples per question)",
+    )
+    parser.add_argument(
+        "--retrieval-mode", default="bm25", choices=["bm25", "embed", "hybrid"],
+        help="Retrieval mode: bm25 (default), embed (semantic), or hybrid (RRF fusion, best quality)",
+    )
+    parser.add_argument(
+        "--embed-cache", default=None,
+        help="Path to precomputed embedding .npy cache (auto-derived if not set)",
     )
     parser.add_argument(
         "--num-samples", type=int, default=1,
@@ -579,9 +671,13 @@ def main() -> None:
     few_shot_retriever = None
     if args.few_shot:
         train_path = Path(args.few_shot)
-        print(f"Building BM25 few-shot index from: {train_path}")
-        few_shot_retriever = build_few_shot_retriever(train_path)
-        print("  BM25 index built.")
+        mode = args.retrieval_mode
+        embed_cache = Path(args.embed_cache) if args.embed_cache else None
+        print(f"Building {mode.upper()} few-shot index from: {train_path}")
+        few_shot_retriever = build_few_shot_retriever(
+            train_path, mode=mode, embed_cache=embed_cache
+        )
+        print(f"  {mode.upper()} index built.")
 
     print(f"Loading model: {args.model}")
     model_fn = run_hf_baseline(args.model, few_shot_retriever=few_shot_retriever)

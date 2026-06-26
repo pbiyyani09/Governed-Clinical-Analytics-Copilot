@@ -268,40 +268,106 @@ Step-10 metrics from the final smoke test confirmed total failure:
 
 ---
 
-## What's Running Now / What's Next
+## Currently Running: ORPO v4
 
-### ORPO v4 — Full Training Set Coverage (new P2)
+**Status (as of 2026-06-26):** Training at step ~30/327 (~9%). ETA: Saturday 2026-06-27 ~07:00 EDT.  
+PID: 1257446 · Log: `logs/orpo_v4_*.log`
 
-The real unlock is that ORPO v3 only used **503 answerable pairs out of 9,318 training questions**. That's a 5.4% coverage rate. The remaining 8,815 questions were left untouched — including all the multi-join and nested-subquery questions that make up the hard cluster.
+**Why ORPO v4:** ORPO v3 used only 503 answerable pairs out of 9,318 training questions (5.4% coverage). ORPO v4 builds execution-verified pairs for **all 9,318 training questions**, producing:
 
-**ORPO v4 strategy:** Build pairs for every training question that ORPO v3 still gets wrong.
+| Pair type | Count |
+|---|---|
+| Answerable (wrong SQL → correct SQL) | 4,856 |
+| Unanswerable (SQL → [ABSTAIN]) | 362 |
+| **Total** | **5,218** |
+
+3,885 questions skipped — model already answers correctly. 577 skipped — model abstains on answerable (handled in a later pass if needed).
+
+**After training completes, run:**
 
 ```bash
-# Step 1 — Build pairs (~8-10 hours)
-bash scripts/build_orpo_v4_pairs.sh
-
-# Step 2 — Train (~3-4 hours)
-bash scripts/run_orpo_v4.sh
-
-# Step 3 — Eval
-bash scripts/run_sft_eval.sh --adapter checkpoints/orpo_v4/adapter_final \
-    --output tests/evalgen/orpo_v4_results.json --repair --few-shot
+bash scripts/run_sft_eval.sh \
+  --adapter checkpoints/orpo_v4/adapter_final \
+  --output tests/evalgen/orpo_v4_results.json \
+  --repair --few-shot
 ```
 
-**Expected pairs:** ~3,500–4,500 answerable + 362 unanswerable = ~4,000–4,800 total.  
-That's **7–9× more gradient steps** than ORPO v3 (500 steps vs 110 steps), all targeting the hard questions.
+---
 
-**Expected EX gain:** +8–15% EX (moderate, since these are hard questions). wrong_on_unans may rise slightly; a small ORPO v4b refinement pass can correct if needed.
+## RAG Overhaul (Parallel Work)
 
-### Projected Path to Target
+While ORPO v4 trains, the retrieval system has been rebuilt. The BM25-only retrieval had two structural failures:
+
+1. **120-char SQL truncation** — survival/mortality SQL (600–800 chars) was cut off mid-expression, making retrieved examples misleading rather than helpful. **Fixed: full SQL now included.**
+
+2. **BM25 keyword failure on hard cluster** — survival queries ("mortality percentage", "survival rate") share keywords with simple lookup queries, so BM25 retrieves irrelevant examples. **Fixed: semantic embedding retrieval added.**
+
+### RAGAS Baseline Measurement (BM25)
+
+Measured using `tag` field as relevance signal (abstract template class, 919 unique values):
+
+| K | Context Recall@K | Context Precision@K |
+|---|---|---|
+| 1 | 0.2654 | 0.2654 |
+| 2 | 0.3456 | 0.2250 |
+| 3 | 0.3923 | 0.1992 |
+| 5 | 0.4699 | 0.1731 |
+| 10 | 0.5684 | 0.1379 |
+
+**MRR: 0.3517**
+
+Per-cluster breakdown:
+- Overall: Hit@2 = 34.6%
+- Hard cluster [800–1175]: Hit@2 = **23.7%** — 31% below average
+
+### Hybrid Retrieval (BM25 + BAAI/bge-large-en-v1.5 + RRF)
+
+New retrieval architecture in `src/ehrcopilot/eval/harness.py`:
+
+- Embedding model: **BAAI/bge-large-en-v1.5** (335 MB, GPU if available, CPU fallback)
+- Index text: `question + sql_skeleton(gold_sql)` — SQL skeleton exposes structural template
+- Fusion: **Reciprocal Rank Fusion** `1/(60+rank_bm25) + 1/(60+rank_embed)`
+- Embeddings pre-computed once and cached to `data/ehrsql/train_embeddings_bge_large.npy`
+
+**Run hybrid RAGAS measurement (after ORPO v4 frees the GPU):**
+
+```bash
+bash scripts/eval_retrieval.sh hybrid      # or: all (compares BM25 vs embed vs hybrid)
+```
+
+**Expected improvement:**
+- Hard cluster Hit@2: 23.7% → 45-55%
+- Overall MRR: 0.35 → 0.50+
+
+### Full Eval with Hybrid RAG
+
+```bash
+bash scripts/run_sft_eval.sh \
+  --adapter checkpoints/orpo_v4/adapter_final \
+  --output tests/evalgen/orpo_v4_hybrid_rag_results.json \
+  --repair --few-shot --retrieval-mode hybrid
+```
+
+---
+
+## Projected Path to Target
 
 | Step | EX | RS(10) |
 |------|-----|--------|
-| ORPO v3 + Repair + RAG (done) | 50.5% | 0.5879 |
-| ORPO v4 + Repair + RAG | ~58–65% | ~0.63–0.70 |
-| Self-consistency voting (×5) | ~61–68% | ~0.66–0.73 |
-| Further ORPO refinement | ~65–72% | ~0.75–0.82 |
-| **Target** | **~77%** | **0.813** |
+| ORPO v3 + Repair + BM25 RAG (current best) | 50.5% | 0.5879 |
+| ORPO v4 + Repair + BM25 RAG | ~58–65% | ~0.63–0.70 |
+| ORPO v4 + Repair + **Hybrid RAG** | ~62–70% | ~0.67–0.77 |
+| Model upgrade to Qwen2.5-Coder-14B (if <0.65) | ~70–75% | ~0.78–0.85 |
+| **EHRSQL 2024 target** | **~77%** | **0.813** |
+
+---
+
+## Model Upgrade Decision Threshold
+
+If ORPO v4 + hybrid RAG eval shows RS(10) < 0.65, upgrade to **Qwen2.5-Coder-14B**:
+- 14B at 4-bit NF4 fits in ~8.5 GB VRAM (hardware has 16 GB)
+- Single `config.py` change propagates through entire pipeline
+- Projected RS(10): 0.80–0.87 with same fine-tuning approach
 
 ---
 

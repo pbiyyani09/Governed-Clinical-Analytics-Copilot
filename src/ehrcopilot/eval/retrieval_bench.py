@@ -450,9 +450,15 @@ def main() -> None:
     json.dump(res, open(out, "w"), indent=2)
     print(f"\nwrote {out}")
 
-    # compact comparison table (sorted by recall@10 then mrr)
-    kref = "10" if "10" in next(iter(res.values()))["per_k"] else next(iter(next(iter(res.values()))["per_k"]))
-    rows = sorted(res.items(), key=lambda kv: (-kv[1]["per_k"][kref]["recall"], -kv[1]["mrr"]))
+    # compact comparison table (sorted by recall@10 then mrr); skip error entries
+    scored = {k: v for k, v in res.items() if "per_k" in v}
+    errored = {k: v.get("error") for k, v in res.items() if "per_k" not in v}
+    if errored:
+        print("\nskipped:", errored)
+    if not scored:
+        return
+    kref = "10" if "10" in next(iter(scored.values()))["per_k"] else next(iter(next(iter(scored.values()))["per_k"]))
+    rows = sorted(scored.items(), key=lambda kv: (-kv[1]["per_k"][kref]["recall"], -kv[1]["mrr"]))
     print(f"\n{'method':38s} | {'R@2':>6} | {'R@10':>6} | {'R@100':>6} | {'P@2':>6} | {'MRR':>6} | {'nDCG@10':>7}")
     print("-" * 96)
     for name, m in rows:

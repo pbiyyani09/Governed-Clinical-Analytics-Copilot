@@ -128,7 +128,7 @@ Precision / Context Recall are already covered by the precision/recall above.
 |---|---|
 | gte-large-en-v1.5, gte-Qwen2-1.5B | custom RoPE / `rope_theta` incompatible with transformers 5.5 (device-side assert) |
 | SFR-Embedding-Code-2B (code-specialized) | `HybridCache` import removed in transformers 5.5 |
-| embeddinggemma-300m | initially gated; license now accepted — re-run pending |
+| embeddinggemma-300m | evaluated (license accepted): q_tag P@2 0.710 / hit@2 0.812 — competitive but slightly below bge-large (0.712 / 0.823); does not change the recommendation |
 | Qwen3-Embedding-4B `q_sql` | OOM at batch 64 (got `q`; lower than bge anyway) |
 
 To include the code-specialized / gte models, run them in a side venv pinned to

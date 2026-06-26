@@ -210,3 +210,43 @@ first 400 q_tag queries).
 It dominates pure logreg (recall) and pure bi-encoder (precision) and degrades
 gracefully via the confidence gate. Confirm with an end-to-end EX pass before
 finalizing.
+
+---
+
+## Reranking & the retrieve→top-5 pipeline (for a Gemma generator)
+
+Goal: feed a Gemma SQL generator the best 5 exemplars (Gemma 3's 1024-token
+sliding-window attention favors few, tightly-relevant chunks). So **P@5** — how
+many of the 5 share the query's template — is the metric that matters.
+
+| top-5 method | q_tag P@5 | hit@2 | hit@5 | tag P@5 |
+|---|---|---|---|---|
+| bi-encoder (bge / MQS) | 0.672 | 0.823 | 0.917 | 0.269 |
+| cross-encoder rerank (bge-reranker-v2-m3, Q-Q, N=10) | 0.669 | 0.815 | 0.922 | 0.266 |
+| **classifier FUSION** (z(cosine)+z(logreg-q_tag)) | **0.850** | 0.856 | 0.860 | 0.295 |
+| classifier GATE (logreg-if-confident → bi) | 0.791 | 0.866 | 0.913 | 0.294 |
+
+**A generic cross-encoder reranker does NOT help here** — bge-reranker-v2-m3 (the
+strongest QA-pair cross-encoder) reranking the top-10/20 by question-question
+relevance left hit@5 flat and slightly *hurt* hit@2. It was trained on passage
+relevance, not EHRSQL template identity, so it reorders by surface similarity that
+is *less* template-aligned than the MQS embedding already is.
+
+**The effective "reranker" for this task is the supervised template classifier.**
+The FUSION reranker (rank every candidate by z-normalised bi-encoder cosine +
+z-normalised logreg probability of its q_tag) puts **~85% same-template exemplars
+in the top-5** (P@5 0.850) vs the bi-encoder's 0.672 — a much cleaner few-shot
+prompt for the generator. It is the default of `build_classifier_retriever`
+(`top_k=5, method="fusion"`); `method="gate"` trades a little P@5 for the best
+hit@2 (0.866).
+
+### Recommended generation pipeline
+1. **Retrieve** top-N (bi-encoder, bge-large + MQS; recall@10 on q_tag = 0.97).
+2. **Rerank/select** with the FUSION classifier → top-5 (P@5 ≈ 0.85).
+3. **Generate** SQL with a **Gemma** model. All gated Gemma generators are
+   accessible with the configured HF token: `gemma-3-4b/12b/27b-it`,
+   `codegemma-7b-it`. Recommended Qwen2.5-Coder-7B analog: **`gemma-3-12b-it`**
+   (128K context, ~8GB 4-bit). codegemma-7b is code-tuned but only 8K context.
+
+The decisive number — end-to-end execution accuracy (EX) — still needs a Gemma
+generation pass over the test set (next step).

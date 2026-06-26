@@ -55,7 +55,8 @@ def _answerable(e: dict) -> bool:
 
 def build_classifier_retriever(
     train_path: Path,
-    top_k: int = 2,
+    top_k: int = 5,
+    method: str = "fusion",
     theta: float = 0.5,
     label_field: str = "q_tag",
     embed_model_name: str = _EMBED_MODEL_NAME,
@@ -100,6 +101,7 @@ def build_classifier_retriever(
 
     # --- TF-IDF + logistic-regression template classifier ---
     clf = vec = None
+    ex_class_idx = None  # per-train-example index into clf.classes_
     class_to_examples: dict[str, list[int]] = {}
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -108,10 +110,12 @@ def build_classifier_retriever(
         vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, sublinear_tf=True)
         Xtr = vec.fit_transform(questions)
         clf = LogisticRegression(max_iter=300, C=10.0).fit(Xtr, labels)
+        cls_index = {c: i for i, c in enumerate(clf.classes_)}
+        ex_class_idx = np.array([cls_index.get(l, -1) for l in labels])
         for i, lab in enumerate(labels):
             class_to_examples.setdefault(lab, []).append(i)
-        print(f"Classifier retriever: {len(set(labels))} {label_field} templates, "
-              f"gate theta={theta}")
+        print(f"Classifier retriever: method={method}, {len(set(labels))} "
+              f"{label_field} templates, theta={theta}")
     except Exception as exc:  # noqa: BLE001
         print(f"[classifier retriever] sklearn unavailable ({exc}); pure bi-encoder fallback")
 
@@ -122,27 +126,38 @@ def build_classifier_retriever(
             lines.append(f"SQL: {gold_sqls[i]}")
         return "\n".join(lines)
 
-    def _bi_order(question: str) -> "np.ndarray":
+    def _sims(question: str) -> "np.ndarray":
         qv = embed_model.encode([query_prefix + _mask_question(question)],
                                 normalize_embeddings=True, convert_to_numpy=True)
-        return np.argsort(-(train_embeds @ qv.T).squeeze())
+        return (train_embeds @ qv.T).squeeze()
+
+    def _zn(a):
+        return (a - a.mean()) / (a.std() + 1e-9)
 
     def _retrieve(question: str) -> str:
-        order = _bi_order(question)
+        sims = _sims(question)
+        order = np.argsort(-sims)
         if clf is None:
             return _format(list(map(int, order[:top_k])))
         proba = clf.predict_proba(vec.transform([question]))[0]
-        conf = float(proba.max())
-        if conf > theta:
+
+        if method == "fusion":
+            # rank every candidate by z(cosine) + z(logreg prob of its template).
+            # Best P@K — ~85% of the top-5 share the query's q_tag template.
+            logreg_ex = np.where(ex_class_idx >= 0, proba[np.clip(ex_class_idx, 0, len(proba) - 1)], 0.0)
+            fused = _zn(sims) + _zn(logreg_ex)
+            return _format(list(map(int, np.argsort(-fused)[:top_k])))
+
+        # method == "gate": commit to the predicted template when confident,
+        # else fall back to pure bi-encoder (best hit@2, graceful on low conf).
+        if float(proba.max()) > theta:
             pred = clf.classes_[int(proba.argmax())]
             cand = class_to_examples.get(pred, [])
-            # rank the predicted template's examples by bi-encoder similarity
             rank = {int(j): r for r, j in enumerate(order)}
             cand = sorted(cand, key=lambda j: rank.get(j, 1 << 30))
-            if len(cand) >= top_k:
-                return _format(cand)
-            seen = set(cand)
-            cand += [int(j) for j in order if int(j) not in seen]
+            if len(cand) < top_k:
+                seen = set(cand)
+                cand += [int(j) for j in order if int(j) not in seen]
             return _format(cand)
         return _format(list(map(int, order[:top_k])))
 

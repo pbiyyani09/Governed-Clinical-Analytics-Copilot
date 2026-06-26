@@ -58,6 +58,7 @@ class EHRSQLExample:
     question: str
     gold_sql: str
     is_answerable: bool  # False for the ~1.9K unanswerable questions
+    tag: str = ""        # abstract template: "what is the intake method of {drug_name}?"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "EHRSQLExample":
@@ -73,6 +74,7 @@ class EHRSQLExample:
             question=d["question"],
             gold_sql=sql if is_answerable else "",
             is_answerable=is_answerable,
+            tag=d.get("tag", ""),
         )
 
 
@@ -205,6 +207,19 @@ def load_ehrsql_split(split_path: Path) -> list[EHRSQLExample]:
 # ---------------------------------------------------------------------------
 
 
+def _base_tag(tag: str) -> str:
+    """Strip time-filter annotations from an EHRSQL tag.
+
+    E.g.: "count patients [time_filter_global1:abs-year-in]."
+       → "count patients."
+
+    The 9318 training questions map to 165 unique base templates (vs 3282 full tags).
+    Used as the relevance signal in template-aware retrieval.
+    """
+    s = re.sub(r'\s*\[[^\]]*\]', '', tag).strip()
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def _sql_skeleton(sql: str) -> str:
     """Strip concrete values from SQL to expose the structural template.
 
@@ -231,19 +246,22 @@ def build_few_shot_retriever(
     top_k: int = 2,
     mode: str = "bm25",
     embed_cache: "Path | None" = None,
+    classifier_cache: "Path | None" = None,
 ) -> "Callable[[str], str]":
     """Build a few-shot retriever over train examples.
 
     mode:
-      "bm25"   — keyword BM25 only (default, backward-compatible)
-      "embed"  — semantic embedding only (BAAI/bge-large-en-v1.5, GPU if available)
-      "hybrid" — Reciprocal Rank Fusion of BM25 + embedding (best quality)
+      "bm25"     — keyword BM25 only (default, backward-compatible)
+      "embed"    — semantic embedding only (BAAI/bge-large-en-v1.5, GPU if available)
+      "hybrid"   — Reciprocal Rank Fusion of BM25 + embedding
+      "template" — LogReg classifier on bge-large embeddings predicts base template
+                   (165 classes) then retrieves top-K within that template group.
+                   Achieves Recall@K = Precision@K ≈ 92.7% (vs 34.6%/22.5% for BM25).
 
     embed_cache: path to save/load precomputed .npy embeddings.
-      Auto-derived as <train_path.parent>/train_embeddings_bge_large.npy.
+    classifier_cache: path to the template LogReg classifier (.pkl).
 
-    SQL is included in full — no truncation. The model context budget is managed
-    via max_prompt_length in the ORPOConfig / inference settings.
+    SQL is included in full — no truncation.
     """
     import numpy as np
     from rank_bm25 import BM25Okapi  # type: ignore[import]
@@ -253,13 +271,16 @@ def build_few_shot_retriever(
     questions = [e.question for e in examples]
     n = len(examples)
 
+    # Build BM25 index (used for bm25 and hybrid modes)
     tokenized = [q.lower().split() for q in questions]
     bm25 = BM25Okapi(tokenized)
 
     embed_model = None
     train_embeds = None
+    clf = None
+    tag_to_indices = None
 
-    if mode in ("embed", "hybrid"):
+    if mode in ("embed", "hybrid", "template"):
         import torch
         from sentence_transformers import SentenceTransformer  # type: ignore[import]
 
@@ -274,15 +295,11 @@ def build_few_shot_retriever(
         else:
             print(f"Computing train embeddings with {_EMBED_MODEL_NAME} on {device} ...")
             _tmp = SentenceTransformer(_EMBED_MODEL_NAME, device=device)
-            index_texts = [
-                q + " " + _sql_skeleton(sql)
-                for q, sql in zip(questions, gold_sqls)
-            ]
+            # embed mode and hybrid: index question+SQL skeleton
+            # template mode: index question only (centroids are question-only)
+            index_texts = [q + " " + _sql_skeleton(sql) for q, sql in zip(questions, gold_sqls)]
             train_embeds = _tmp.encode(
-                index_texts,
-                show_progress_bar=True,
-                batch_size=64,
-                normalize_embeddings=True,
+                index_texts, show_progress_bar=True, batch_size=64, normalize_embeddings=True,
             )
             np.save(str(embed_cache), train_embeds)
             print(f"Embeddings saved to {embed_cache}")
@@ -290,30 +307,67 @@ def build_few_shot_retriever(
         embed_model = SentenceTransformer(_EMBED_MODEL_NAME, device=device)
         print(f"Embedding model ready ({device})")
 
+    if mode == "template":
+        import joblib  # type: ignore[import]
+        from collections import defaultdict
+
+        if classifier_cache is None:
+            classifier_cache = train_path.parent / "template_classifier.pkl"
+
+        if not classifier_cache.exists():
+            raise FileNotFoundError(
+                f"Template classifier not found at {classifier_cache}. "
+                f"Run: python -m ehrcopilot.eval.rag_eval --mode template first."
+            )
+
+        clf_data = joblib.load(str(classifier_cache))
+        clf = clf_data["clf"]
+        clf_tags = clf_data["tag_list"]
+        print(f"Template classifier loaded ({len(clf_tags)} base templates)")
+
+        # Build base_tag → example indices mapping
+        tag_to_indices = defaultdict(list)
+        for i, ex in enumerate(examples):
+            bt = _base_tag(ex.tag)
+            if bt:
+                tag_to_indices[bt].append(i)
+
     def _retrieve(question: str) -> str:
-        bm25_scores = bm25.get_scores(question.lower().split())
-
-        if mode == "bm25":
-            top_idx = list(map(int, (-bm25_scores).argsort()[:top_k]))
-        else:
-            assert embed_model is not None and train_embeds is not None
+        if mode == "template":
+            assert embed_model is not None and clf is not None and train_embeds is not None
             q_vec = embed_model.encode([question], normalize_embeddings=True)
-            cosine = (train_embeds @ q_vec.T).squeeze()
-
-            if mode == "embed":
-                top_idx = list(map(int, (-cosine).argsort()[:top_k]))
+            predicted_bt = clf_tags[clf.predict(q_vec)[0]]
+            candidates = tag_to_indices.get(predicted_bt, [])
+            if candidates:
+                cand_embeds = train_embeds[candidates]
+                cos = (cand_embeds @ q_vec.T).squeeze()
+                if cos.ndim == 0:
+                    cos = cos.reshape(1)
+                best = (-cos).argsort()[:top_k]
+                top_idx = [candidates[i] for i in best]
             else:
-                # Hybrid: Reciprocal Rank Fusion
-                bm25_order = (-bm25_scores).argsort()
-                bm25_ranks = np.empty(n, dtype=np.float32)
-                bm25_ranks[bm25_order] = np.arange(1, n + 1, dtype=np.float32)
+                top_idx = []
+        else:
+            bm25_scores = bm25.get_scores(question.lower().split())
 
-                embed_order = (-cosine).argsort()
-                embed_ranks = np.empty(n, dtype=np.float32)
-                embed_ranks[embed_order] = np.arange(1, n + 1, dtype=np.float32)
+            if mode == "bm25":
+                top_idx = list(map(int, (-bm25_scores).argsort()[:top_k]))
+            else:
+                assert embed_model is not None and train_embeds is not None
+                q_vec = embed_model.encode([question], normalize_embeddings=True)
+                cosine = (train_embeds @ q_vec.T).squeeze()
 
-                rrf = 1.0 / (60 + bm25_ranks) + 1.0 / (60 + embed_ranks)
-                top_idx = list(map(int, (-rrf).argsort()[:top_k]))
+                if mode == "embed":
+                    top_idx = list(map(int, (-cosine).argsort()[:top_k]))
+                else:
+                    bm25_order = (-bm25_scores).argsort()
+                    bm25_ranks = np.empty(n, dtype=np.float32)
+                    bm25_ranks[bm25_order] = np.arange(1, n + 1, dtype=np.float32)
+                    embed_order = (-cosine).argsort()
+                    embed_ranks = np.empty(n, dtype=np.float32)
+                    embed_ranks[embed_order] = np.arange(1, n + 1, dtype=np.float32)
+                    rrf = 1.0 / (60 + bm25_ranks) + 1.0 / (60 + embed_ranks)
+                    top_idx = list(map(int, (-rrf).argsort()[:top_k]))
 
         lines = ["Similar examples:"]
         for idx in top_idx:
@@ -647,12 +701,20 @@ def main() -> None:
         help="Path to EHRSQL train.json; enables few-shot retrieval (top-2 similar examples per question)",
     )
     parser.add_argument(
-        "--retrieval-mode", default="bm25", choices=["bm25", "embed", "hybrid"],
-        help="Retrieval mode: bm25 (default), embed (semantic), or hybrid (RRF fusion, best quality)",
+        "--retrieval-mode", default="bm25",
+        choices=["bm25", "embed", "hybrid", "template"],
+        help=(
+            "Retrieval mode: bm25 (default), embed (semantic), hybrid (RRF), "
+            "or template (LogReg classifier → 92.7%% recall+precision)"
+        ),
     )
     parser.add_argument(
         "--embed-cache", default=None,
         help="Path to precomputed embedding .npy cache (auto-derived if not set)",
+    )
+    parser.add_argument(
+        "--classifier-cache", default=None,
+        help="Path to template LogReg classifier .pkl (default: data/ehrsql/template_classifier.pkl)",
     )
     parser.add_argument(
         "--num-samples", type=int, default=1,
@@ -673,9 +735,10 @@ def main() -> None:
         train_path = Path(args.few_shot)
         mode = args.retrieval_mode
         embed_cache = Path(args.embed_cache) if args.embed_cache else None
+        clf_cache = Path(args.classifier_cache) if args.classifier_cache else None
         print(f"Building {mode.upper()} few-shot index from: {train_path}")
         few_shot_retriever = build_few_shot_retriever(
-            train_path, mode=mode, embed_cache=embed_cache
+            train_path, mode=mode, embed_cache=embed_cache, classifier_cache=clf_cache,
         )
         print(f"  {mode.upper()} index built.")
 

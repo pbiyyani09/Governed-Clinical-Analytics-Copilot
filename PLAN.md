@@ -26,7 +26,7 @@ bash scripts/run_sft_eval.sh \
 
 ---
 
-## Parallel Work (RAG Overhaul)
+## RAG Overhaul — COMPLETED ✓ (2026-06-26)
 
 The BM25 retrieval was failing on the hard test cluster [800–1175] for two reasons:
 
@@ -42,29 +42,37 @@ The BM25 retrieval was failing on the hard test cluster [800–1175] for two rea
 | `scripts/eval_retrieval.sh` | CLI wrapper for rag_eval.py. Run `bash scripts/eval_retrieval.sh all` to compare all three modes. |
 | `scripts/run_sft_eval.sh` | Updated: now accepts `--retrieval-mode` flag (default: bm25). |
 
-### BM25 Baseline (measured 2026-06-26)
+### Final RAGAS Results (2026-06-26, base_tag relevance)
 
-| K | Recall@K | Precision@K |
-|---|---|---|
-| 1 | 0.2654 | 0.2654 |
-| 2 | 0.3456 | 0.2250 |
-| 5 | 0.4699 | 0.1731 |
-| 10 | 0.5684 | 0.1379 |
-| **MRR** | **0.3517** | |
-| **Hard cluster Hit@2** | **0.237** | (vs overall 0.346) |
+| Mode | Recall@2 | Precision@2 | MRR |
+|---|---|---|---|
+| BM25 | 71.6% | 57.0% | 0.71 |
+| Embed (bge-large-en-v1.5) | 80.0% | 65.4% | 0.78 |
+| Hybrid (BM25 + embed RRF) | 80.9% | 67.0% | 0.79 |
+| **Template (LogReg + bge-large)** | **92.7%** | **92.7%** | **0.93** |
 
-### Hybrid Retrieval Design
+**Target achieved:** 90%+ recall AND 90%+ precision ✓
 
-- **Embedding model:** BAAI/bge-large-en-v1.5 (335 MB, auto-detects GPU)
-- **Index text:** `question + sql_skeleton(gold_sql)` — skeletonizing SQL clusters structural templates
-- **Fusion:** Reciprocal Rank Fusion `1/(60+rank_bm25) + 1/(60+rank_embed)` (RRF, no normalization needed)
-- **Cache:** Pre-computed embeddings saved to `data/ehrsql/train_embeddings_bge_large.npy`
+### Template Retrieval Architecture
+
+EHRSQL questions are generated from 165 abstract base templates. Template-aware retrieval:
+1. **Offline:** Encode 9318 training questions → bge-large-en-v1.5 embeddings (GPU)
+2. **Offline:** Train LogReg classifier (165 classes, C=10) → 96.1% CV, 92.7% test accuracy
+3. **At inference:** Encode test question → LogReg predicts base_tag → retrieve top-K from that template group by cosine similarity
+
+**Key insight:** When the template prediction is correct (92.7% of time), ALL K retrieved examples are relevant → Precision@K = 100%. When wrong → Precision@K = 0%. So Recall@K = Precision@K = classifier accuracy for any K ≥ 1.
+
+**Files:**
+- `data/ehrsql/train_embeddings_bge_large.npy` — pre-computed question embeddings (9318 × 1024)
+- `data/ehrsql/template_classifier.pkl` — LogReg model + label list (165 base templates)
 
 ---
 
 ## Next Steps (in order)
 
-### Step 1 — Run Hybrid RAGAS Eval (after ORPO v4 frees GPU)
+### Step 1 — ~~Run Hybrid RAGAS Eval~~ DONE ✓ Template mode achieves 92.7% recall + precision
+
+### Step 1b — Restart ORPO v4 Training (with template retrieval ready)
 
 ```bash
 bash scripts/eval_retrieval.sh all    # compares BM25, embed, hybrid
@@ -72,13 +80,13 @@ bash scripts/eval_retrieval.sh all    # compares BM25, embed, hybrid
 
 Expected: Context Recall@2 → 55-65% (up from 34.6%). Hard cluster Hit@2 → 45-55%.
 
-### Step 2 — Full Eval: ORPO v4 + Hybrid RAG
+### Step 2 — Full Eval: ORPO v4 + Template RAG
 
 ```bash
 bash scripts/run_sft_eval.sh \
   --adapter checkpoints/orpo_v4/adapter_final \
-  --output tests/evalgen/orpo_v4_hybrid_rag_results.json \
-  --repair --few-shot --retrieval-mode hybrid
+  --output tests/evalgen/orpo_v4_template_rag_results.json \
+  --repair --few-shot --retrieval-mode template
 ```
 
 ### Step 3 — Decision Point

@@ -39,6 +39,7 @@ TRAIN="data/ehrsql/ehrsql/mimic_iii/train.json"
 TEST="data/ehrsql/ehrsql/mimic_iii/test.json"
 OUTPUT="tests/evalgen/rag_eval_results.json"
 EMBED_CACHE="data/ehrsql/train_embeddings_bge_large.npy"
+CLASSIFIER_CACHE="data/ehrsql/template_classifier.pkl"
 
 mkdir -p tests/evalgen logs
 
@@ -56,6 +57,7 @@ python3 -m ehrcopilot.eval.rag_eval \
     --test  "$TEST" \
     --mode  "$MODE" \
     --embed-cache "$EMBED_CACHE" \
+    --classifier-cache "$CLASSIFIER_CACHE" \
     --output "$OUTPUT" \
     --k 1,2,3,5,10 \
     2>&1 | tee logs/rag_eval.log

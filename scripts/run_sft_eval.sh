@@ -38,6 +38,7 @@ REPAIR_FLAG=""
 FEW_SHOT_FLAG=""
 NUM_SAMPLES_FLAG=""
 RETRIEVAL_MODE_FLAG=""
+CLASSIFIER_CACHE_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --few-shot) FEW_SHOT_FLAG="--few-shot $TRAIN"; shift ;;
         --num-samples) NUM_SAMPLES_FLAG="--num-samples $2"; shift 2 ;;
         --retrieval-mode) RETRIEVAL_MODE_FLAG="--retrieval-mode $2"; shift 2 ;;
+        --classifier-cache) CLASSIFIER_CACHE_FLAG="--classifier-cache $2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -69,6 +71,7 @@ python3 -m ehrcopilot.eval.harness \
     $REPAIR_FLAG \
     $FEW_SHOT_FLAG \
     $RETRIEVAL_MODE_FLAG \
+    $CLASSIFIER_CACHE_FLAG \
     $NUM_SAMPLES_FLAG \
     2>&1 | tee logs/sft_eval.log
 

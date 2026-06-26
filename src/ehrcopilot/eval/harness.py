@@ -676,8 +676,9 @@ def main() -> None:
         help="Path to EHRSQL train.json; enables few-shot retrieval (top-2 similar examples per question)",
     )
     parser.add_argument(
-        "--retrieval-mode", default="hybrid", choices=["bm25", "embed", "hybrid"],
-        help="Retrieval mode: hybrid (default, RRF fusion, best — ablation-selected), bm25, or embed",
+        "--retrieval-mode", default="hybrid", choices=["bm25", "embed", "hybrid", "classifier"],
+        help="Retrieval mode: hybrid (default), bm25, embed, or classifier "
+             "(q_tag logreg + bi-encoder gate — best on the template oracle)",
     )
     parser.add_argument(
         "--embed-cache", default=None,
@@ -703,9 +704,13 @@ def main() -> None:
         mode = args.retrieval_mode
         embed_cache = Path(args.embed_cache) if args.embed_cache else None
         print(f"Building {mode.upper()} few-shot index from: {train_path}")
-        few_shot_retriever = build_few_shot_retriever(
-            train_path, mode=mode, embed_cache=embed_cache
-        )
+        if mode == "classifier":
+            from ehrcopilot.eval.template_retriever import build_classifier_retriever
+            few_shot_retriever = build_classifier_retriever(train_path, embed_cache=embed_cache)
+        else:
+            few_shot_retriever = build_few_shot_retriever(
+                train_path, mode=mode, embed_cache=embed_cache
+            )
         print(f"  {mode.upper()} index built.")
 
     print(f"Loading model: {args.model}")

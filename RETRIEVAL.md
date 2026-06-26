@@ -1,3 +1,13 @@
+> **Major update (supervised template classification).** The single biggest lever
+> is not the embedding model — it is recognizing that EHRSQL's `q_tag` field is a
+> **question-template label**, which makes example selection a *supervised
+> classification* problem, not unsupervised retrieval. See
+> **"Supervised template classification (the q_tag insight)"** at the bottom — a
+> logreg+bi-encoder gate hits **hit@2 0.866 / P@2 0.811** on the q_tag oracle,
+> beating both pure logreg (0.837, flat recall) and the bi-encoder (0.823). The
+> earlier sections used the stricter `tag` oracle (3,282 classes); read them with
+> that denominator in mind.
+
 # Retrieval-Mechanism Study — EHRSQL NL→SQL few-shot example selection
 
 **Branch:** `gemma_dev_rebased`
@@ -118,7 +128,7 @@ Precision / Context Recall are already covered by the precision/recall above.
 |---|---|
 | gte-large-en-v1.5, gte-Qwen2-1.5B | custom RoPE / `rope_theta` incompatible with transformers 5.5 (device-side assert) |
 | SFR-Embedding-Code-2B (code-specialized) | `HybridCache` import removed in transformers 5.5 |
-| embeddinggemma-300m | HF repo gated — license not accepted on the configured token |
+| embeddinggemma-300m | initially gated; license now accepted — re-run pending |
 | Qwen3-Embedding-4B `q_sql` | OOM at batch 64 (got `q`; lower than bge anyway) |
 
 To include the code-specialized / gte models, run them in a side venv pinned to
@@ -132,3 +142,71 @@ bash scripts/run_retrieval_ablation.sh q q_sql      # isolated model ablation
 bash scripts/run_retrieval_ablation.sh mqs          # masked-question pass
 # scoring reuses cached embeddings; HNSW: add --index hnsw to retrieval_bench
 ```
+
+---
+
+## Supervised template classification (the q_tag insight)
+
+A colleague reported a **logistic-regression** retriever reaching precision@2 /
+recall@2 ≈ 0.92 — far above the bi-encoder numbers above. Investigating this
+exposed a framing error in the first study and a better method.
+
+### Two things were wrong in the first pass
+
+1. **Wrong oracle.** The first study scored against the `tag` field — which has
+   **3,282** unique values in train (it concatenates question + time + operation
+   sub-templates). The colleague scored against **`q_tag`** — the *question*
+   template alone: **167** unique values, **100% test coverage**. The same
+   bi-encoder scores hit@2 **0.823** on `q_tag` vs **0.477** on `tag`. Most of the
+   "0.92 vs 0.48" gap was the denominator, not the method.
+2. **Wrong problem class.** `q_tag` is a **label that exists in the training data**.
+   That makes example selection a *supervised classification* problem (predict the
+   template, return its examples), not unsupervised cosine similarity. This is the
+   EHRSQL-2024 / KU-DMIS "question templatization" idea and the Meta-Sel
+   (arXiv:2602.12123) TF-IDF-logreg ICL-selection result. The first round of
+   research surveyed unsupervised retrievers and missed it.
+
+### Head-to-head on the q_tag oracle (1,198 queries)
+
+| method | P@2 | hit@2 | hit@5 | hit@10 | hit@20 |
+|---|---|---|---|---|---|
+| TF-IDF + LogReg (q_tag) | 0.837 | 0.837 | 0.837 | 0.837 | 0.837 |
+| bi-encoder (bge / MQS) | 0.712 | 0.823 | 0.917 | 0.967 | 0.986 |
+| fusion (z-norm logreg + cosine) | **0.851** | 0.856 | 0.860 | 0.862 | 0.872 |
+| **GATE (logreg-if-confident → bi)** | 0.811 | **0.866** | 0.913 | 0.949 | 0.967 |
+
+- **LogReg** has high precision but **flat recall** — it commits to one predicted
+  template and cannot recover from a wrong top-1 (hit@10 == hit@2 == 0.837). A
+  quick TF-IDF logreg lands at 0.837; tuned features (char n-grams, entity masking,
+  embedding inputs) reach the reported ~0.92.
+- **bi-encoder** has lower precision but **climbs to hit@10 0.967** — it hedges
+  across templates.
+- **GATE** = best of both: if the classifier is confident (max prob > θ) return the
+  predicted template's examples ranked by bi-encoder similarity, else fall back to
+  pure bi-encoder. Beats both on hit@2 (0.866) while keeping recall (hit@10 0.949).
+  It also lifts the finer `tag` oracle (hit@2 0.477 → 0.504).
+
+Implemented as `src/ehrcopilot/eval/template_retriever.py`; selectable via
+`harness --retrieval-mode classifier`. Validated end-to-end (hit@2 0.895 on the
+first 400 q_tag queries).
+
+### Honest caveats
+
+- **`q_tag` is a coarser relevance target than `tag`.** Same `q_tag` ⇒ same question
+  type ⇒ usually (not always) the same SQL skeleton; the finer `tag` also pins the
+  time/operation variation. Which target best predicts end-to-end EX is unknown
+  until a generation pass is run. Report q_tag and tag numbers side by side; do not
+  quote the q_tag number alone as "retrieval precision".
+- **Closed-set dependence.** `q_tag` has 100% coverage on this mimic_iii test split,
+  so abstention is rarely triggered. The EHRSQL-2024 (mimic_iv) split deliberately
+  holds out ~25% unseen templates; there the classifier would mis-route confidently
+  and the bi-encoder fallback (the gate's θ) is what prevents catastrophic failure.
+- The classifier predicts q_tag **from the question text** (it does not read the
+  gold q_tag at test time), so this is a legitimate "given a question, find
+  same-template examples" result — but it is measuring template-classification
+  accuracy on a closed set, which is an easier task than open retrieval.
+
+**Recommended default:** the GATE classifier hybrid (`--retrieval-mode classifier`).
+It dominates pure logreg (recall) and pure bi-encoder (precision) and degrades
+gracefully via the confidence gate. Confirm with an end-to-end EX pass before
+finalizing.

@@ -1,0 +1,17 @@
+{
+  "total": 1786,
+  "answerable": 1198,
+  "unanswerable": 588,
+  "EX": 0.505,
+  "RS(0)": 0.6607,
+  "RS(5)": 0.6243,
+  "RS(10)": 0.5879,
+  "correct_answers": 605,
+  "wrong_abstentions": 61,
+  "wrong_answers_on_unanswerable": 13,
+  "correct_abstentions": 575,
+  "p50_latency_ms": 1585.6,
+  "p95_latency_ms": 5795.2,
+  "repair_attempts": 1494,
+  "repair_successes": 125
+}

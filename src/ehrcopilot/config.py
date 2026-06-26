@@ -304,10 +304,33 @@ CONFIDENCE_THRESHOLD: float = float(os.getenv("EHRCOPILOT_CONF_THRESHOLD", "0.5"
 # ---------------------------------------------------------------------------
 
 
+# Foreign key relationships between MIMIC-IV-Demo tables.
+# Included in schema prompts to help the model find join paths without guessing.
+_FK_HINTS: str = (
+    "Foreign keys: "
+    "admissions.subject_id→patients.subject_id | "
+    "icustays.hadm_id→admissions.hadm_id | "
+    "icustays.subject_id→patients.subject_id | "
+    "diagnoses_icd.hadm_id→admissions.hadm_id | "
+    "diagnoses_icd.icd_code=d_icd_diagnoses.icd_code | "
+    "procedures_icd.hadm_id→admissions.hadm_id | "
+    "procedures_icd.icd_code=d_icd_procedures.icd_code | "
+    "labevents.hadm_id→admissions.hadm_id | "
+    "labevents.itemid→d_labitems.itemid | "
+    "prescriptions.hadm_id→admissions.hadm_id | "
+    "chartevents.stay_id→icustays.stay_id | "
+    "chartevents.itemid→d_items.itemid | "
+    "microbiologyevents.hadm_id→admissions.hadm_id | "
+    "pharmacy.hadm_id→admissions.hadm_id | "
+    "transfers.hadm_id→admissions.hadm_id"
+)
+
+
 def schema_to_prompt(linked_schema: dict[str, list[str]] | None = None) -> str:
-    """Serialize schema (or a linked subset) into a compact prompt string."""
+    """Serialize schema (or a linked subset) into a compact prompt string with FK hints."""
     source = linked_schema if linked_schema else SCHEMA_ALLOWLIST
     lines: list[str] = ["Database schema (MIMIC-IV-Demo):"]
     for table, cols in source.items():
         lines.append(f"  {table}({', '.join(cols)})")
+    lines.append(_FK_HINTS)
     return "\n".join(lines)

@@ -216,3 +216,36 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# EHR Copilot — data files (never commit raw or built data)
+data/mimic-iv-demo/
+data/*.db
+data/*.sqlite
+*.db
+*.sqlite
+
+# Model artifacts and checkpoints (large binaries)
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+*.awq
+
+# EHRSQL raw data (CC-BY; distribute license not data)
+data/ehrsql/
+
+# Environment and secrets
+.env
+*.env
+secrets.json
+
+# Phoenix tracing local store
+phoenix_storage/
+cache/
+
+# Coverage and test artifacts
+.coverage
+htmlcov/
+

@@ -5,6 +5,11 @@ __pycache__/
 
 # C extensions
 *.so
+.claude/*
+
+# Unsloth auto-generated compiled trainer cache + training logs
+unsloth_compiled_cache/
+logs/
 
 # Distribution / packaging
 .Python

@@ -132,12 +132,13 @@ def _load_grpo_dataset(data_path: Path) -> "Dataset":
                 "gold_sql": gold_sql,
             })
 
-    # Skip unanswerable examples whose gold_sql is [ABSTAIN] — reward fn handles them,
-    # but we want the gold_sql column populated for answerable pairs too.
-    print(f"  {len(raw)} GRPO examples loaded")
-    ans = sum(1 for r in raw if r["is_answerable"])
-    unans = sum(1 for r in raw if not r["is_answerable"])
-    print(f"  Answerable: {ans} | Unanswerable: {unans}")
+    # GRPO only trains on answerable examples: unanswerable questions are already
+    # well-calibrated in ORPO v3 (96.8% correct abstention rate). Including them
+    # causes std=0 batches (all K rollouts say [ABSTAIN] → all +1.0) and wastes
+    # GPU time without providing gradient signal for EX improvement.
+    raw = [r for r in raw if r["is_answerable"]]
+
+    print(f"  {len(raw)} GRPO examples loaded (answerable only)")
     return Dataset.from_list(raw)
 
 
@@ -157,8 +158,8 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--beta", type=float, default=0.001,
                         help="KL penalty weight (keep low for exploration)")
-    parser.add_argument("--temperature", type=float, default=1.2,
-                        help="Sampling temperature for rollout diversity (default 1.2)")
+    parser.add_argument("--temperature", type=float, default=1.5,
+                        help="Sampling temperature for rollout diversity (default 1.5)")
     parser.add_argument("--max-completion-length", type=int, default=150)
     parser.add_argument("--resume-from-checkpoint", default=None)
     args = parser.parse_args()

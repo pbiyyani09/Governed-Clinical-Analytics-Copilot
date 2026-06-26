@@ -7,7 +7,7 @@
 #                            [--max-examples N] [--resume-from-checkpoint PATH]
 #
 # Defaults: adapter=checkpoints/orpo_v3/adapter_final, output=checkpoints/grpo_v2,
-#           epochs=1, K=4, temperature=1.2 (full dataset, no --max-examples limit)
+#           epochs=1, K=4, temperature=1.5, answerable-only (no --max-examples limit)
 #
 # Smoke test (2000 examples, ~30-40 min):
 #   bash scripts/run_grpo.sh --max-examples 2000 --output checkpoints/grpo_v2_smoke
@@ -40,7 +40,7 @@ OUTPUT="checkpoints/grpo_v2"
 DATA="data/ehrsql/sft_train_v2.jsonl"
 EPOCHS=1
 NUM_GEN=4
-TEMPERATURE="1.2"
+TEMPERATURE="1.5"
 MAX_EXAMPLES=""
 RESUME=""
 

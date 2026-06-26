@@ -40,6 +40,8 @@ def main() -> None:
     parser.add_argument("--output", default="checkpoints/dpo", help="Output dir")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
+    parser.add_argument("--max-length", type=int, default=1536,
+                        help="Max tokens for prompt+chosen/rejected (default 1536; use 1024 to speed up)")
     parser.add_argument("--orpo-lambda", type=float, default=0.1,
                         help="ORPO lambda: weight of odds-ratio loss vs SFT loss")
     parser.add_argument("--resume-from-checkpoint", default=None,
@@ -88,8 +90,8 @@ def main() -> None:
     orpo_config = ORPOConfig(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=16,
-        max_length=1536,
-        max_prompt_length=896,
+        max_length=args.max_length,
+        max_prompt_length=min(896, args.max_length - 200),
         beta=args.orpo_lambda,   # TRL's ORPOConfig uses 'beta' as the lambda parameter name
         learning_rate=args.lr,
         num_train_epochs=args.epochs,

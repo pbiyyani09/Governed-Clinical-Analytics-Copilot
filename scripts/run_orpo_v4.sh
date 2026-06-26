@@ -44,6 +44,7 @@ ADAPTER="checkpoints/orpo_v3/adapter_final"
 OUTPUT="checkpoints/orpo_v4"
 EPOCHS=1
 LR="5e-6"
+MAX_LENGTH="1536"
 RESUME=""
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --output) OUTPUT="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
         --lr) LR="$2"; shift 2 ;;
+        --max-length) MAX_LENGTH="$2"; shift 2 ;;
         --resume-from-checkpoint) RESUME="--resume-from-checkpoint $2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -78,6 +80,7 @@ python3 -m ehrcopilot.finetune.abstention_dpo \
     --output "$OUTPUT" \
     --epochs "$EPOCHS" \
     --lr "$LR" \
+    --max-length "$MAX_LENGTH" \
     $RESUME \
     2>&1 | tee "$LOGFILE"
 

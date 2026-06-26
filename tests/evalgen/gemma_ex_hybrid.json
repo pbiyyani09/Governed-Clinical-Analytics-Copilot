@@ -1,0 +1,17 @@
+{
+  "total": 75,
+  "answerable": 50,
+  "unanswerable": 25,
+  "EX": 0.42,
+  "RS(0)": 0.48,
+  "RS(5)": -0.1867,
+  "RS(10)": -0.8533,
+  "correct_answers": 21,
+  "wrong_abstentions": 10,
+  "wrong_answers_on_unanswerable": 10,
+  "correct_abstentions": 15,
+  "p50_latency_ms": 9452.8,
+  "p95_latency_ms": 26644.7,
+  "repair_attempts": 23,
+  "repair_successes": 0
+}

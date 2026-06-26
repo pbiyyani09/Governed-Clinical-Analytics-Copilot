@@ -250,3 +250,44 @@ hit@2 (0.866).
 
 The decisive number — end-to-end execution accuracy (EX) — still needs a Gemma
 generation pass over the test set (next step).
+
+---
+
+## End-to-end EX with a Gemma generator (the honest result)
+
+Wired the full pipeline — retrieve → fusion-top-5 → **gemma-3-12b-it** (base, no
+fine-tuning) generates SQL → execute → EX/RS. (Required fixes: a SQL-execution
+watchdog timeout, Unsloth `FastModel` loading for Gemma 3, and **stripping
+markdown code fences** from generated SQL — without the last one EX was a silent
+0 because Gemma wraps correct SQL in ```sqlite fences.)
+
+3-way comparison, gemma-3-12b-it, 75-question stratified subset (50 answerable +
+25 unanswerable), varying ONLY the retriever:
+
+| config | EX | RS(10) | correct | wrong-abstentions | wrong_on_unans | p50 |
+|---|---|---|---|---|---|---|
+| zero-shot | 0.42 | −0.707 | 21/50 | 17 | 9 | 6.1s |
+| bi-encoder hybrid (top-2) | 0.42 | −0.853 | 21/50 | 10 | 10 | 9.5s |
+| classifier fusion (top-5) | 0.42 | −0.707 | 21/50 | 5 | 9 | 13.6s |
+
+**Retrieval improves the retrieval metrics but NOT base-model EX.** The few-shot
+examples are clearly used — they cut over-abstention from 17→5 (the model attempts
+many more answerable questions with examples in context) — but those extra attempts
+produce *wrong* SQL, so EX is flat at 0.42. The end-to-end bottleneck is the base
+generator's SQL correctness on hard (multi-join / nested) questions, not the
+quality of the retrieved examples.
+
+**Implications**
+- The retrieval improvements (MQS, q_tag classifier/fusion, P@5 0.85) are real and
+  correct, but on their own they do not move EX with an *untuned* generator.
+- The lever for EX is **fine-tuning the Gemma generator** (SFT + abstention ORPO),
+  exactly the original pipeline. RS(10) is dominated by un-calibrated abstention
+  (−0.7) — a training problem, not a retrieval one.
+- Retrieval is expected to pay off *after* fine-tuning (as it did for the Qwen
+  campaign: ORPO v3 + repair + RAG added +66 correct answers over no-RAG). It
+  should be re-evaluated on the fine-tuned Gemma model.
+- Caveat: 50 answerable questions is a small sample (95% CI ≈ ±0.14); the exact tie
+  at 21 is partly coincidence, but the abstention/latency deltas confirm the
+  retrieval is applied and EX is genuinely flat at this scale.
+
+Per-config results: `tests/evalgen/gemma_ex_{zeroshot,hybrid,classifier}.json`.

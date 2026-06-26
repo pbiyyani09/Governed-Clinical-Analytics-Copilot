@@ -29,6 +29,30 @@ from ehrcopilot.db.connection import execute_query
 
 ABSTAIN_TOKEN = "[ABSTAIN]"
 
+# Instruction-tuned generators (e.g. Gemma 3) tend to wrap SQL in markdown code
+# fences and/or add prose. The raw string then fails to execute. _extract_sql
+# pulls out the actual query so EX is not silently zero.
+_SQL_FENCE_RE = re.compile(r"```(?:sql|sqlite|postgresql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_SQL_START_RE = re.compile(r"\b(SELECT|WITH)\b", re.IGNORECASE)
+
+
+def _extract_sql(text: str) -> str:
+    """Strip markdown fences / prose around a generated SQL query (or [ABSTAIN])."""
+    s = text.strip()
+    if ABSTAIN_TOKEN.lower() in s.lower():
+        return ABSTAIN_TOKEN
+    m = _SQL_FENCE_RE.search(s)
+    if m:
+        s = m.group(1).strip()
+    # drop a leading language tag / "SQL:" prefix the model sometimes emits
+    s = re.sub(r"^\s*(sql|sqlite|query)\s*[:\-]?\s*", "", s, flags=re.IGNORECASE).strip()
+    # if prose precedes the query, start at the first SELECT/WITH
+    start = _SQL_START_RE.search(s)
+    if start:
+        s = s[start.start():]
+    return s.strip().strip("`").strip()
+
+
 # MIMIC-III column names that were renamed in MIMIC-IV.
 # Applied to gold SQL before execution so the gold standard is valid against
 # the MIMIC-IV-Demo database. Without this, 71% of gold SQL fails, causing
@@ -428,7 +452,8 @@ def run_hf_baseline(
                         temperature=temperature if do_sample else None,
                         pad_token_id=tokenizer.eos_token_id,
                     )
-                return tokenizer.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                raw = tokenizer.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                return _extract_sql(raw)
 
             def _user_content(self, question: str) -> str:
                 if few_shot_retriever is None:

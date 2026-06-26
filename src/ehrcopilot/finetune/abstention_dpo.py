@@ -39,6 +39,7 @@ def main() -> None:
     parser.add_argument("--adapter", required=True, help="SFT adapter path")
     parser.add_argument("--output", default="checkpoints/dpo", help="Output dir")
     parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
     parser.add_argument("--orpo-lambda", type=float, default=0.1,
                         help="ORPO lambda: weight of odds-ratio loss vs SFT loss")
     parser.add_argument("--resume-from-checkpoint", default=None,
@@ -90,7 +91,7 @@ def main() -> None:
         max_length=1536,
         max_prompt_length=896,
         beta=args.orpo_lambda,   # TRL's ORPOConfig uses 'beta' as the lambda parameter name
-        learning_rate=5e-6,
+        learning_rate=args.lr,
         num_train_epochs=args.epochs,
         lr_scheduler_type="cosine",
         optim="paged_adamw_8bit",

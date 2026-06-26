@@ -245,39 +245,62 @@ To close 402 points:
 
 ---
 
+---
+
+### GRPO v2 — Execution-Reward Training (failed, same root cause as v1)
+
+Both GRPO attempts failed with the same structural problem.
+
+**Root cause — SQL generation is bimodal and constrained:**
+
+For any given question, the model generates near-identical SQL across all K=4 rollouts. Temperature=1.5 doesn't help because the SQL structure is dictated by the schema and question — the model either knows the right join pattern or it doesn't. Within each K-group:
+- If the model "knows" the answer: all 4 rollouts correct → all +1.0 → std=0
+- If the model doesn't know: all 4 rollouts wrong → all -0.5 or all -0.2 → std=0
+
+Step-10 metrics from the final smoke test confirmed total failure:
+```
+'frac_reward_zero_std': '0.9'   → 90% of groups still zero within-group variance
+'grad_norm': '0'                 → no policy gradient at all
+'loss': '0.0005834'             → only KL penalty term, zero RL signal
+```
+
+**GRPO is not the right tool for SQL generation.** It requires diversity within rollout groups; SQL doesn't provide it. Abandoned.
+
+---
+
 ## What's Running Now / What's Next
 
-### GRPO v2 — In Progress
+### ORPO v4 — Full Training Set Coverage (new P2)
 
-The GRPO v1 failure was due to binary rewards creating zero reward variance. GRPO v2 fixes this with a **3-tier reward**:
+The real unlock is that ORPO v3 only used **503 answerable pairs out of 9,318 training questions**. That's a 5.4% coverage rate. The remaining 8,815 questions were left untouched — including all the multi-join and nested-subquery questions that make up the hard cluster.
 
+**ORPO v4 strategy:** Build pairs for every training question that ORPO v3 still gets wrong.
+
+```bash
+# Step 1 — Build pairs (~8-10 hours)
+bash scripts/build_orpo_v4_pairs.sh
+
+# Step 2 — Train (~3-4 hours)
+bash scripts/run_orpo_v4.sh
+
+# Step 3 — Eval
+bash scripts/run_sft_eval.sh --adapter checkpoints/orpo_v4/adapter_final \
+    --output tests/evalgen/orpo_v4_results.json --repair --few-shot
 ```
-+1.0   SQL executes AND result matches gold
--0.2   SQL executes but result is wrong
--0.5   SQL fails to execute (syntax/schema error)   ← KEY CHANGE
--1.0   [ABSTAIN] on an answerable question
-+1.0   Correct [ABSTAIN] on unanswerable
--10.0  SQL on unanswerable (hallucination)
-```
 
-Even when all K=4 rollouts are wrong, the distinction between "syntax error" and "wrong result" creates variance within the group → non-zero gradient → the model learns.
+**Expected pairs:** ~3,500–4,500 answerable + 362 unanswerable = ~4,000–4,800 total.  
+That's **7–9× more gradient steps** than ORPO v3 (500 steps vs 110 steps), all targeting the hard questions.
 
-Additional changes: starting from ORPO v3 adapter (EX=45%, more uncertainty), temperature 1.2 (was 0.8), full 9,728-example dataset (was 800).
-
-Expected: EX 50.5% → 60–70%, RS(10) ~0.63–0.72 (before ORPO v4 calibration).
-
-### After GRPO v2 — ORPO v4
-
-GRPO typically increases EX but hurts abstention precision (wrong_on_unans tends to rise). ORPO v4 will run after GRPO v2 to pull wrong_on_unans back down to ~3–5, similar to what ORPO v3 did after SFT v2.
+**Expected EX gain:** +8–15% EX (moderate, since these are hard questions). wrong_on_unans may rise slightly; a small ORPO v4b refinement pass can correct if needed.
 
 ### Projected Path to Target
 
 | Step | EX | RS(10) |
 |------|-----|--------|
 | ORPO v3 + Repair + RAG (done) | 50.5% | 0.5879 |
-| GRPO v2 + Repair + RAG | ~60–70% | ~0.63–0.72 |
-| ORPO v4 (abstention calibration) | ~60–70% | ~0.75–0.82 |
-| Self-consistency voting (×5) | ~63–73% | ~0.78–0.85 |
+| ORPO v4 + Repair + RAG | ~58–65% | ~0.63–0.70 |
+| Self-consistency voting (×5) | ~61–68% | ~0.66–0.73 |
+| Further ORPO refinement | ~65–72% | ~0.75–0.82 |
 | **Target** | **~77%** | **0.813** |
 
 ---

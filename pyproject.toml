@@ -26,15 +26,21 @@ eval = [
 ]
 
 train = [
-    "transformers>=4.45.0",
+    # Gemma 3 support landed in transformers 4.50; Unsloth needs a recent build.
+    "transformers>=4.50.0",
     "trl>=0.9.0",
     "peft>=0.11.0",
     "bitsandbytes>=0.43.0",
     "accelerate>=0.30.0",
     "torch>=2.3.0",
-    "unsloth>=2024.9",
+    "unsloth>=2025.3.1",
+    "unsloth_zoo>=2025.3.1",
     "datasets>=2.19.0",
     "huggingface-hub>=0.23.0",
+    # Gemma 3 is a multimodal checkpoint; loading it pulls in the vision tower
+    # (timm) and the SentencePiece tokenizer even for text-only finetuning.
+    "timm>=1.0.0",
+    "sentencepiece>=0.2.0",
 ]
 
 serve = [

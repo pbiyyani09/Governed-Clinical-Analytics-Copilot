@@ -222,11 +222,18 @@ data/mimic-iv-demo/
 data/*.db
 data/*.sqlite
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 
 # Model artifacts and checkpoints (large binaries)
 models/
 checkpoints/
+
+# Unsloth auto-generated compiled trainer cache + training logs
+unsloth_compiled_cache/
+logs/
 *.safetensors
 *.bin
 *.pt
@@ -249,3 +256,14 @@ cache/
 .coverage
 htmlcov/
 
+
+# --- Claude Code multi-agent harness (local-only, never push) ---
+.claude/
+CLAUDE.md
+MEMORY.md
+*.claude-log.md
+# Secrets — API keys live here and must never be committed
+.env
+.env.*
+.secrets/
+# --- end harness ---

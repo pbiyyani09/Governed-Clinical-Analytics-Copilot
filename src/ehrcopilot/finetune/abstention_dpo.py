@@ -39,6 +39,9 @@ def main() -> None:
     parser.add_argument("--adapter", required=True, help="SFT adapter path")
     parser.add_argument("--output", default="checkpoints/dpo", help="Output dir")
     parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--max-steps", type=int, default=-1,
+                        help="Cap total optimizer steps (overrides epochs when > 0). "
+                             "Use a small value for a smoke test.")
     parser.add_argument("--orpo-lambda", type=float, default=0.1,
                         help="ORPO lambda: weight of odds-ratio loss vs SFT loss")
     parser.add_argument("--resume-from-checkpoint", default=None,
@@ -53,7 +56,8 @@ def main() -> None:
                 "transformers",
             )
         import torch
-        from unsloth import FastLanguageModel  # type: ignore[import]
+        # Gemma 3 is multimodal — load via Unsloth FastModel (aliased for stable call sites).
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
         from trl import ORPOConfig, ORPOTrainer  # type: ignore[import]
         from datasets import Dataset  # type: ignore[import]
     except ImportError as exc:
@@ -67,6 +71,11 @@ def main() -> None:
         dtype=torch.bfloat16,
         load_in_4bit=True,
     )
+
+    # Gemma 3 requires token_type_ids during training; TRL's ORPO collator omits
+    # it. Default it to zeros (all-text) so the odds-ratio loss can run.
+    from ehrcopilot.finetune._gemma_compat import patch_token_type_ids
+    patch_token_type_ids(model)
 
     print(f"Loading preference pairs from {args.pairs}")
     raw_pairs = []
@@ -87,14 +96,20 @@ def main() -> None:
     orpo_config = ORPOConfig(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=16,
-        max_length=1536,
+        # ORPO forwards chosen+rejected concatenated (~2x SFT activations). The
+        # schema-heavy prompt is ~750 tokens and completions are short, so real
+        # sequences are <1024; capping max_length here trims peak VRAM on the
+        # 24 GB 3090 with no data loss.
+        max_length=1024,
         max_prompt_length=896,
         beta=args.orpo_lambda,   # TRL's ORPOConfig uses 'beta' as the lambda parameter name
         learning_rate=5e-6,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         lr_scheduler_type="cosine",
         optim="paged_adamw_8bit",
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         bf16=True,
         output_dir=str(output_dir),
         report_to="none",

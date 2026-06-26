@@ -291,9 +291,12 @@ QUERY_TIMEOUT_SECONDS: int = int(os.getenv("EHRCOPILOT_QUERY_TIMEOUT", "10"))
 MAX_ROWS: int = int(os.getenv("EHRCOPILOT_MAX_ROWS", "1000"))
 MAX_SEQ_LENGTH: int = 1536
 
-# Model for inference (overridden in serve config for AWQ path)
+# Model for inference (overridden in serve config for AWQ path).
+# Gemma 3 12B replaces Qwen2.5-Coder-7B (org policy: Gemma-only). The canonical
+# weights live at google/gemma-3-12b-it but are license-gated on the HF Hub; we
+# default to Unsloth's ungated mirror so loading works without an HF token.
 INFERENCE_MODEL: str = os.getenv(
-    "EHRCOPILOT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"
+    "EHRCOPILOT_MODEL", "unsloth/gemma-3-12b-it"
 )
 
 # Reliability gate confidence threshold — tune on dev set

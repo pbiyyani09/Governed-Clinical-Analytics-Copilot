@@ -1,9 +1,30 @@
 # Training Progress & Experiment Log
 
 **Goal:** Beat the EHRSQL 2024 leaderboard top score of RS(10) = 0.8132 (LG AI / KAIST)  
-**Model:** Qwen2.5-Coder-7B-Instruct fine-tuned with QLoRA on MIMIC-IV-Demo / EHRSQL  
-**Hardware:** RTX 4080 Super 16GB (training) · RTX 5080 16GB GDDR7 (inference)  
-**Current best:** RS(10) = **0.5879** (ORPO v3 + Repair Loop + BM25 RAG)
+**Model:** Gemma 3 12B Instruct fine-tuned with QLoRA on MIMIC-IV-Demo / EHRSQL  
+**Hardware:** RTX 3090 24GB GDDR6X (training + inference)  
+**Current best:** RS(10) = **0.5879** (Qwen-era ORPO v3 + Repair Loop + BM25 RAG — see migration note)
+
+---
+
+## ⚠️ Model Migration: Qwen → Gemma 3 12B (branch `Gemma_dev`)
+
+This project was originally developed on **Qwen2.5-Coder-7B-Instruct**. Per an
+organizational model-governance restriction we have migrated to **Gemma 3 12B
+Instruct** (`google/gemma-3-12b-it`; loaded from the ungated Unsloth mirror
+`unsloth/gemma-3-12b-it` since the Google weights are license-gated on the HF Hub).
+
+**What this means for the log below:**
+
+- Every numbered experiment in "Experiment History" (Baseline → ORPO v3 + Repair +
+  RAG) and the leaderboard/gap-analysis tables were measured on **Qwen** and are
+  retained verbatim as the prior campaign. They are *not* Gemma numbers.
+- The Gemma 3 12B re-run reuses the identical pipeline (data prep → QLoRA SFT →
+  ORPO → optional GRPO v2 → eval with `--repair --few-shot`). Notable differences:
+  Gemma has **no code-specialized variant** (Qwen-Coder did), it is a larger 12B
+  multimodal checkpoint finetuned text-only, and training/inference now run on a
+  single RTX 3090 (24 GB) rather than the 4080 Super / 5080 pair.
+- New Gemma results are appended under "## Gemma 3 12B Results" as they complete.
 
 ---
 
@@ -27,7 +48,11 @@ At N=10, each hallucination on an unanswerable question costs **11 net RS points
 
 ---
 
-## Experiment History
+## Experiment History (Qwen2.5-Coder-7B — prior campaign)
+
+> All numbers in this section were measured on Qwen2.5-Coder-7B-Instruct. They are
+> the historical baseline the Gemma 3 12B re-run is being compared against. See the
+> "Gemma 3 12B Results" section for the migrated run.
 
 ### Baseline — Qwen2.5-Coder-7B-Instruct (no fine-tuning)
 
@@ -242,6 +267,20 @@ To close 402 points:
 - **Reduce wrong_on_unans 13 → 3** → saves 10 × 11 = **+110 RS points**
 - **Increase EX 50.5% → 77%** → adds ~317 correct answers = **+317 RS points**
 - Margin above target: 25 points
+
+---
+
+## Gemma 3 12B Results
+
+> Branch `Gemma_dev`. Same pipeline as the Qwen campaign, re-run on
+> `unsloth/gemma-3-12b-it`. Results are appended here as each stage completes.
+
+| Stage | EX | RS(0) | RS(5) | RS(10) | correct_ans | wrong_on_unans | status |
+|-------|----|-------|-------|--------|-------------|----------------|--------|
+| Gemma 3 12B base (no FT) | TBD | TBD | TBD | TBD | TBD | TBD | running |
+| + QLoRA SFT | TBD | TBD | TBD | TBD | TBD | TBD | pending |
+| + Abstention-ORPO | TBD | TBD | TBD | TBD | TBD | TBD | pending |
+| + Repair + RAG | TBD | TBD | TBD | TBD | TBD | TBD | pending |
 
 ---
 

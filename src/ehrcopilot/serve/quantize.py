@@ -22,13 +22,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--adapter", required=True, help="DPO adapter path (Unsloth format)")
     parser.add_argument("--output", default="models", help="Output base directory")
-    parser.add_argument("--base-model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--base-model", default="unsloth/gemma-3-12b-it")
     parser.add_argument("--gguf", action="store_true", help="Also export GGUF Q4_K_M")
     args = parser.parse_args()
 
     try:
         import torch
-        from unsloth import FastLanguageModel  # type: ignore[import]
+        # Gemma 3 is multimodal — load via Unsloth FastModel (aliased).
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
     except ImportError as exc:
         print(f"Training dependencies not installed: {exc}")
         sys.exit(1)
@@ -73,7 +74,7 @@ def main() -> None:
         f"      --load-format bitsandbytes \\\n"
         f"      --max-model-len 1536 \\\n"
         f"      --tensor-parallel-size 1 \\\n"
-        f"      --served-model-name qwen25coder7b-ehrsql"
+        f"      --served-model-name gemma3-12b-ehrsql"
     )
 
 

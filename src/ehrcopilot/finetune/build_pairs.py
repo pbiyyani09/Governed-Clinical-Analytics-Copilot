@@ -183,7 +183,8 @@ def build_pairs(
             # ── Answerable DPO pairs (1 model inference per question) ─────────
             try:
                 import torch
-                from unsloth import FastLanguageModel  # type: ignore[import]
+                # Gemma 3 is multimodal — load via Unsloth FastModel (aliased).
+                from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
             except ImportError as exc:
                 print(f"Cannot load model for answerable pairs: {exc}")
                 print("Writing unanswerable-only pairs.")

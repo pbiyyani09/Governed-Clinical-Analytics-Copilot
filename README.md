@@ -31,7 +31,7 @@ User question
 [Schema Linker] → BM25 retrieval → minimal relevant schema subset
      │
      ▼
-[SQL Writer] → Qwen2.5-Coder-7B (QLoRA SFT + Abstention-DPO)
+[SQL Writer] → Gemma 3 12B (QLoRA SFT + Abstention-DPO)
      │
      ▼
 [Layer 1: Read-only / single-statement]  ─┐
@@ -58,8 +58,7 @@ User question
 
 | GPU | Role |
 |-----|------|
-| RTX 4080 Super (16 GB) | Fine-tuning (QLoRA SFT + Abstention-DPO) |
-| RTX 5080 (16 GB GDDR7) | Inference serving (vLLM AWQ-4bit) + interactive dev |
+| RTX 3090 (24 GB GDDR6X) | Fine-tuning (QLoRA SFT + Abstention-DPO) + inference for the Gemma 3 12B run |
 
 ## Quick Start
 
@@ -67,7 +66,8 @@ User question
 # 1. Clone and install
 git clone https://github.com/pbiyyani09/Governed-Clinical-Analytics-Copilot
 cd Governed-Clinical-Analytics-Copilot
-pip install -e ".[eval,agents,dev]"
+# Local QLoRA finetuning of Gemma 3 12B (Unsloth) needs the training extra too:
+uv venv --python 3.11 .venv && uv pip install --python .venv -e ".[train,eval,agents,dev]"
 
 # 2. Download MIMIC-IV-Demo (free PhysioNet registration required)
 #    https://physionet.org/content/mimic-iv-demo/2.2/
@@ -80,8 +80,10 @@ bash src/ehrcopilot/db/build_sqlite.sh
 pytest src/ehrcopilot/guardrails/tests/ -v
 
 # 5. Run baseline evaluation (requires GPU + model download)
+#    Gemma 3 weights are license-gated on the HF Hub; the ungated Unsloth mirror
+#    below loads without an HF token.
 python -m ehrcopilot.eval.harness data/ehrsql/ehrsql/mimic_iii/test.json \
-  --model Qwen/Qwen2.5-Coder-7B-Instruct
+  --model unsloth/gemma-3-12b-it
 
 # 6. Start the API server (requires AWQ model artifact)
 uvicorn ehrcopilot.serve.app:app --reload
@@ -91,7 +93,7 @@ uvicorn ehrcopilot.serve.app:app --reload
 
 | Model | EX | RS(0) | RS(5) | RS(10) |
 |-------|----|-------|-------|--------|
-| Qwen2.5-Coder-7B base | TBD | TBD | TBD | TBD |
+| Gemma 3 12B base | TBD | TBD | TBD | TBD |
 | + QLoRA SFT | TBD | TBD | TBD | TBD |
 | + Abstention-DPO | TBD | TBD | TBD | TBD |
 | EHRSQL 2024 winner (LG AI/KAIST) | — | — | — | 81.32 |

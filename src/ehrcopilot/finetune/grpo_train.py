@@ -164,7 +164,8 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        from unsloth import FastLanguageModel  # type: ignore[import]
+        # Gemma 3 is multimodal — load via Unsloth FastModel (aliased).
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
         from trl import GRPOConfig, GRPOTrainer  # type: ignore[import]
     except ImportError as exc:
         print(f"Training dependencies not installed: {exc}")
@@ -177,6 +178,10 @@ def main() -> None:
         dtype=torch.bfloat16,
         load_in_4bit=True,
     )
+
+    # Gemma 3 requires token_type_ids during training; default it to zeros.
+    from ehrcopilot.finetune._gemma_compat import patch_token_type_ids
+    patch_token_type_ids(model)
 
     print(f"Loading GRPO dataset: {args.data}")
     dataset = _load_grpo_dataset(Path(args.data))

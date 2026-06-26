@@ -47,10 +47,14 @@ banner "Gemma 3 12B pipeline START (SFT_EPOCHS=$SFT_EPOCHS ORPO_EPOCHS=$ORPO_EPO
 
 # ── Stage 1: QLoRA SFT ───────────────────────────────────────────────
 banner "[1/6] QLoRA SFT ($SFT_EPOCHS epoch)" | tee -a "$PLOG"
-$PYBIN -m ehrcopilot.finetune.qlora_sft \
-    --data "$SFT_DATA" --output checkpoints/sft --epochs "$SFT_EPOCHS" \
-    2>&1 | tee logs/gemma_sft.log
-[ -d checkpoints/sft/adapter_final ] || die "SFT produced no adapter"
+if [ -d checkpoints/sft/adapter_final ]; then
+    echo "SFT adapter already exists — skipping stage 1 (resume)." | tee -a "$PLOG"
+else
+    $PYBIN -m ehrcopilot.finetune.qlora_sft \
+        --data "$SFT_DATA" --output checkpoints/sft --epochs "$SFT_EPOCHS" \
+        2>&1 | tee logs/gemma_sft.log
+    [ -d checkpoints/sft/adapter_final ] || die "SFT produced no adapter"
+fi
 
 # ── Stage 2: eval SFT on subset ──────────────────────────────────────
 banner "[2/6] Eval SFT on 500-subset (--repair --few-shot)" | tee -a "$PLOG"
@@ -61,22 +65,30 @@ $PYBIN -m ehrcopilot.eval.harness "$SUBSET" \
 
 # ── Stage 3: build ORPO pairs ────────────────────────────────────────
 banner "[3/6] Build Abstention-ORPO pairs (max_answerable=$MAX_ANSWERABLE)" | tee -a "$PLOG"
-$PYBIN -m ehrcopilot.finetune.build_pairs \
-    --train "$TRAIN" --valid "$VALID" \
-    --adapter checkpoints/sft/adapter_final \
-    --output data/ehrsql/dpo_pairs.jsonl \
-    --max-answerable "$MAX_ANSWERABLE" --verify-execution \
-    2>&1 | tee logs/gemma_pairs.log
-[ -s data/ehrsql/dpo_pairs.jsonl ] || die "no ORPO pairs written"
+if [ -s data/ehrsql/dpo_pairs.jsonl ]; then
+    echo "ORPO pairs already exist — skipping stage 3 (resume)." | tee -a "$PLOG"
+else
+    $PYBIN -m ehrcopilot.finetune.build_pairs \
+        --train "$TRAIN" --valid "$VALID" \
+        --adapter checkpoints/sft/adapter_final \
+        --output data/ehrsql/dpo_pairs.jsonl \
+        --max-answerable "$MAX_ANSWERABLE" --verify-execution \
+        2>&1 | tee logs/gemma_pairs.log
+    [ -s data/ehrsql/dpo_pairs.jsonl ] || die "no ORPO pairs written"
+fi
 
 # ── Stage 4: Abstention-ORPO ─────────────────────────────────────────
 banner "[4/6] Abstention-ORPO ($ORPO_EPOCHS epochs)" | tee -a "$PLOG"
-$PYBIN -m ehrcopilot.finetune.abstention_dpo \
-    --pairs data/ehrsql/dpo_pairs.jsonl \
-    --adapter checkpoints/sft/adapter_final \
-    --output checkpoints/orpo --epochs "$ORPO_EPOCHS" --orpo-lambda 0.1 \
-    2>&1 | tee logs/gemma_orpo.log
-[ -d checkpoints/orpo/adapter_final ] || die "ORPO produced no adapter"
+if [ -d checkpoints/orpo/adapter_final ]; then
+    echo "ORPO adapter already exists — skipping stage 4 (resume)." | tee -a "$PLOG"
+else
+    $PYBIN -m ehrcopilot.finetune.abstention_dpo \
+        --pairs data/ehrsql/dpo_pairs.jsonl \
+        --adapter checkpoints/sft/adapter_final \
+        --output checkpoints/orpo --epochs "$ORPO_EPOCHS" --orpo-lambda 0.1 \
+        2>&1 | tee logs/gemma_orpo.log
+    [ -d checkpoints/orpo/adapter_final ] || die "ORPO produced no adapter"
+fi
 
 # ── Stage 5: eval ORPO on subset (delta vs SFT) ──────────────────────
 banner "[5/6] Eval ORPO on 500-subset (--repair --few-shot)" | tee -a "$PLOG"

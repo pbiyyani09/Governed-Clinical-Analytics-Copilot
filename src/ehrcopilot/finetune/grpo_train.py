@@ -159,7 +159,7 @@ def main() -> None:
                         help="KL penalty weight (keep low for exploration)")
     parser.add_argument("--temperature", type=float, default=1.2,
                         help="Sampling temperature for rollout diversity (default 1.2)")
-    parser.add_argument("--max-completion-length", type=int, default=256)
+    parser.add_argument("--max-completion-length", type=int, default=150)
     parser.add_argument("--resume-from-checkpoint", default=None)
     args = parser.parse_args()
 

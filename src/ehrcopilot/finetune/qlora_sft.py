@@ -43,6 +43,10 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=-1,
                         help="Cap optimizer steps (overrides epochs when > 0); use a small value to smoke-test.")
     parser.add_argument("--max-seq-length", type=int, default=1536)
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="per_device_train_batch_size (raise on a big GPU, e.g. 8-16 on a 95GB card)")
+    parser.add_argument("--grad-accum", type=int, default=16,
+                        help="gradient_accumulation_steps (lower it when raising --batch-size to keep effective batch)")
     parser.add_argument("--resume-from-checkpoint", default=None,
                         help="Path to checkpoint dir to resume from (or 'true' for latest)")
     args = parser.parse_args()
@@ -103,8 +107,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     training_args = SFTConfig(
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
         max_length=args.max_seq_length,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,

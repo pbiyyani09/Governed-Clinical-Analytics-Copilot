@@ -1,3 +1,10 @@
+# Colab data bundles (large binaries — distribute manually via Drive)
+colab/*.zip
+colab/*.z[0-9][0-9]
+colab/*.db
+colab/*.npy
+colab/*.pkl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

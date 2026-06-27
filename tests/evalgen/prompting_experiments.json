@@ -1,0 +1,67 @@
+{
+  "base": {
+    "EX": 0.4,
+    "RS(0)": 0.48,
+    "RS(10)": -0.72,
+    "correct": 20,
+    "wrong_answers": 25,
+    "wrong_abstentions": 5,
+    "wrong_on_unanswerable": 9,
+    "correct_abstentions": 16,
+    "n_answerable": 50,
+    "n_unanswerable": 25,
+    "minutes": 16.7
+  },
+  "ctx": {
+    "EX": 0.34,
+    "RS(0)": 0.29333333333333333,
+    "RS(10)": -2.3733333333333335,
+    "correct": 17,
+    "wrong_answers": 32,
+    "wrong_abstentions": 1,
+    "wrong_on_unanswerable": 20,
+    "correct_abstentions": 5,
+    "n_answerable": 50,
+    "n_unanswerable": 25,
+    "minutes": 21.4
+  },
+  "cot": {
+    "EX": 0.4,
+    "RS(0)": 0.30666666666666664,
+    "RS(10)": -2.6266666666666665,
+    "correct": 20,
+    "wrong_answers": 30,
+    "wrong_abstentions": 0,
+    "wrong_on_unanswerable": 22,
+    "correct_abstentions": 3,
+    "n_answerable": 50,
+    "n_unanswerable": 25,
+    "minutes": 23.8
+  },
+  "agentic": {
+    "EX": 0.42,
+    "RS(0)": 0.36,
+    "RS(10)": -2.1733333333333333,
+    "correct": 21,
+    "wrong_answers": 4,
+    "wrong_abstentions": 25,
+    "wrong_on_unanswerable": 19,
+    "correct_abstentions": 6,
+    "n_answerable": 50,
+    "n_unanswerable": 25,
+    "minutes": 66.4
+  },
+  "abstain": {
+    "EX": 0.42,
+    "RS(0)": 0.44,
+    "RS(10)": -1.2933333333333332,
+    "correct": 21,
+    "wrong_answers": 2,
+    "wrong_abstentions": 27,
+    "wrong_on_unanswerable": 13,
+    "correct_abstentions": 12,
+    "n_answerable": 50,
+    "n_unanswerable": 25,
+    "minutes": 68.4
+  }
+}

@@ -40,8 +40,9 @@ def main() -> None:
     parser.add_argument("--output", default="checkpoints/dpo", help="Output dir")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
-    parser.add_argument("--max-length", type=int, default=1536,
-                        help="Max tokens for prompt+chosen/rejected (default 1536; use 1024 to speed up)")
+    parser.add_argument("--max-length", type=int, default=1024,
+                        help="Max tokens for prompt+chosen/rejected (default 1024 — fits EHRSQL "
+                             "schema-prompt+SQL and avoids Gemma-3 ORPO OOM on 24GB; raise to 1536 if needed)")
     parser.add_argument("--orpo-lambda", type=float, default=0.1,
                         help="ORPO lambda: weight of odds-ratio loss vs SFT loss")
     parser.add_argument("--resume-from-checkpoint", default=None,
@@ -56,12 +57,17 @@ def main() -> None:
                 "transformers",
             )
         import torch
-        from unsloth import FastLanguageModel  # type: ignore[import]
+        # Gemma 3 is multimodal — load via Unsloth FastModel (aliased).
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
         from trl import ORPOConfig, ORPOTrainer  # type: ignore[import]
         from datasets import Dataset  # type: ignore[import]
     except ImportError as exc:
         print(f"Training dependencies not installed: {exc}")
         sys.exit(1)
+
+    # Reduce CUDA fragmentation — ORPO's concatenated chosen+rejected forward OOMs
+    # at step 2 from fragmentation otherwise on a 24GB card.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     print(f"Loading SFT adapter from {args.adapter}")
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -70,6 +76,11 @@ def main() -> None:
         dtype=torch.bfloat16,
         load_in_4bit=True,
     )
+
+    # Gemma 3 requires token_type_ids during training; TRL's ORPO collator omits
+    # it (and passes input_ids positionally). Default it to zeros (all-text).
+    from ehrcopilot.finetune._gemma_compat import patch_token_type_ids
+    patch_token_type_ids(model)
 
     print(f"Loading preference pairs from {args.pairs}")
     raw_pairs = []
@@ -98,6 +109,7 @@ def main() -> None:
         lr_scheduler_type="cosine",
         optim="paged_adamw_8bit",
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         bf16=True,
         output_dir=str(output_dir),
         report_to="none",

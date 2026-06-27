@@ -38,8 +38,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True, help="SFT JSONL data path")
     parser.add_argument("--output", default="checkpoints/sft", help="Output dir")
-    parser.add_argument("--base-model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--base-model", default="unsloth/gemma-3-12b-it")
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max-steps", type=int, default=-1,
+                        help="Cap optimizer steps (overrides epochs when > 0); use a small value to smoke-test.")
     parser.add_argument("--max-seq-length", type=int, default=1536)
     parser.add_argument("--resume-from-checkpoint", default=None,
                         help="Path to checkpoint dir to resume from (or 'true' for latest)")
@@ -48,7 +50,9 @@ def main() -> None:
     # Lazy imports — only loaded when actually training
     try:
         import torch
-        from unsloth import FastLanguageModel  # type: ignore[import]
+        # Gemma 3 12B is a multimodal checkpoint; load via Unsloth FastModel
+        # (FastLanguageModel is text-only). Aliased to keep call sites stable.
+        from unsloth import FastModel as FastLanguageModel  # type: ignore[import]
         from trl import SFTConfig, SFTTrainer  # type: ignore[import]
         from datasets import Dataset  # type: ignore[import]
     except ImportError as exc:
@@ -103,6 +107,7 @@ def main() -> None:
         gradient_accumulation_steps=16,
         max_length=args.max_seq_length,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,

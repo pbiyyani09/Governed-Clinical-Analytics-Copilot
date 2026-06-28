@@ -334,3 +334,23 @@ def schema_to_prompt(linked_schema: dict[str, list[str]] | None = None) -> str:
         lines.append(f"  {table}({', '.join(cols)})")
     lines.append(_FK_HINTS)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Unified system prompt — used identically in training (build_pairs.py) and
+# eval (harness.py). Must be kept in sync so the model sees the same context
+# it was trained on.
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT: str = (
+    "You are a clinical analytics assistant. Convert the user's question into "
+    "a valid SQLite SELECT query over the MIMIC-IV-Demo database.\n\n"
+    "Output exactly [ABSTAIN] — nothing else — when the question asks about "
+    "information NOT derivable from the schema below. This includes: "
+    "doctor or provider identities, family history, drug side effects or "
+    "pharmacology, future or scheduled hospital visits, patient contact "
+    "information, or any concept not represented by the tables and columns "
+    "listed below.\n\n"
+    "Otherwise output only the SQL query with no explanation.\n\n"
+    + schema_to_prompt()
+)

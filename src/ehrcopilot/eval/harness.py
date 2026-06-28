@@ -403,12 +403,7 @@ def run_hf_baseline(
     """
     import torch
 
-    system_prompt = (
-        "You are a clinical analytics assistant. Convert the user's question into "
-        "a valid SQLite SELECT query over the MIMIC-IV-Demo database. "
-        "If the question cannot be answered with the available data, output exactly: [ABSTAIN]\n\n"
-        + config.schema_to_prompt()
-    )
+    system_prompt = config.SYSTEM_PROMPT
 
     import os as _os
     is_local = (

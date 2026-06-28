@@ -58,18 +58,9 @@ ABSTAIN_TOKEN = "[ABSTAIN]"
 
 
 def _build_messages(question: str) -> list[dict]:
-    # Use full schema — matches what eval harness and SFT training see
-    schema_text = config.schema_to_prompt()
+    # Use the unified system prompt from config — identical to what eval harness uses.
     return [
-        {
-            "role": "system",
-            "content": (
-                "You are a clinical analytics SQL expert. Convert the user's question "
-                "into a valid SQLite SELECT query.\n"
-                f"If the question cannot be answered, output exactly: {ABSTAIN_TOKEN}\n\n"
-                f"{schema_text}"
-            ),
-        },
+        {"role": "system", "content": config.SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
 
@@ -113,6 +104,7 @@ def build_pairs(
     max_answerable: int = 500,
     unanswerable_only: bool = False,
     verify_execution: bool = False,
+    inference_rejected: bool = False,
     num_samples: int = 1,
     seed: int = 42,
 ) -> dict[str, int]:
@@ -140,6 +132,7 @@ def build_pairs(
     print(f"Unanswerable examples: {len(unanswerable_examples)}")
     print(f"Answerable examples (capped at {max_answerable}): {min(len(answerable_examples), max_answerable)}")
     print(f"Mode: {'unanswerable-only' if unanswerable_only else 'unanswerable + answerable'}")
+    print(f"Unanswerable rejected: {'model inference (stronger signal)' if inference_rejected else 'random gold SQL (fast)'}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     stats: dict[str, int] = {
@@ -152,17 +145,50 @@ def build_pairs(
         "skipped_exec_match": 0,
     }
 
+    # Pre-load model if needed for either inference-rejected unanswerable or answerable pairs
+    model = None
+    tokenizer = None
+    needs_model = inference_rejected or not unanswerable_only
+    if needs_model:
+        try:
+            import torch
+            from unsloth import FastLanguageModel  # type: ignore[import]
+            print(f"\nLoading adapter from {adapter_path} ...")
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=str(adapter_path),
+                max_seq_length=config.MAX_SEQ_LENGTH,
+                dtype=torch.bfloat16,
+                load_in_4bit=True,
+            )
+            FastLanguageModel.for_inference(model)
+            print("Model ready.")
+        except ImportError as exc:
+            print(f"Cannot load model: {exc}")
+            if not unanswerable_only:
+                print("Falling back to unanswerable-only mode with random rejected SQL.")
+                unanswerable_only = True
+                inference_rejected = False
+
     with open(output_path, "w") as f:
 
-        # ── Unanswerable DPO pairs (no model inference needed) ────────────────
+        # ── Unanswerable DPO pairs ────────────────────────────────────────────
         print(f"\nBuilding unanswerable DPO pairs ({len(unanswerable_examples)} examples)...")
-        for ex in unanswerable_examples:
+        for i, ex in enumerate(unanswerable_examples):
+            if i % 50 == 0:
+                print(f"  Unanswerable {i}/{len(unanswerable_examples)} ...", flush=True)
             stats["total_processed"] += 1
             messages = _build_messages(ex.question)
 
-            # Rejected = random gold SQL from answerable set
-            # The model should learn to prefer [ABSTAIN] over any SQL here
-            rejected_sql = random.choice(gold_sql_pool)
+            if inference_rejected and model is not None:
+                # Use model's actual output as rejected — stronger training signal.
+                # If the model already abstains, fall back to random SQL (pair still useful:
+                # it reinforces [ABSTAIN] but counts as a trivially-won comparison).
+                rejected_sql = _sample_one(model, tokenizer, messages, temperature=0.8)
+                if rejected_sql == ABSTAIN_TOKEN or not rejected_sql.strip():
+                    rejected_sql = random.choice(gold_sql_pool)
+            else:
+                # Fast fallback: random gold SQL from answerable set.
+                rejected_sql = random.choice(gold_sql_pool)
 
             pair = {
                 "id": ex.id,
@@ -181,24 +207,11 @@ def build_pairs(
             print("Skipping answerable pairs (--unanswerable-only)")
         else:
             # ── Answerable DPO pairs (1 model inference per question) ─────────
-            try:
-                import torch
-                from unsloth import FastLanguageModel  # type: ignore[import]
-            except ImportError as exc:
-                print(f"Cannot load model for answerable pairs: {exc}")
-                print("Writing unanswerable-only pairs.")
+            if model is None:
+                print("Model not loaded — skipping answerable pairs.")
             else:
-                print(f"\nLoading SFT model from {adapter_path} for answerable pairs...")
-                model, tokenizer = FastLanguageModel.from_pretrained(
-                    model_name=str(adapter_path),
-                    max_seq_length=config.MAX_SEQ_LENGTH,
-                    dtype=torch.bfloat16,
-                    load_in_4bit=True,
-                )
-                FastLanguageModel.for_inference(model)
-
                 ans_subset = answerable_examples[:max_answerable]
-                print(f"Building answerable DPO pairs ({len(ans_subset)} examples)...")
+                print(f"\nBuilding answerable DPO pairs ({len(ans_subset)} examples)...")
 
                 for i, ex in enumerate(ans_subset):
                     stats["total_processed"] += 1
@@ -278,6 +291,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-answerable", type=int, default=500)
     parser.add_argument("--unanswerable-only", action="store_true",
                         help="Skip answerable pairs, focus on abstention DPO only")
+    parser.add_argument("--inference-rejected", action="store_true",
+                        help="For unanswerable pairs: run inference to get model's actual output "
+                             "as the rejected response (stronger signal than random gold SQL). "
+                             "Slower but produces cleaner abstention pairs.")
     parser.add_argument("--verify-execution", action="store_true",
                         help="For answerable pairs: skip if model output executes correctly "
                              "(execution-verified matching, cleaner signal than string-diff)")
@@ -293,6 +310,7 @@ if __name__ == "__main__":
         valid_path=Path(args.valid) if args.valid else None,
         max_answerable=args.max_answerable,
         unanswerable_only=args.unanswerable_only,
+        inference_rejected=args.inference_rejected,
         verify_execution=args.verify_execution,
         num_samples=args.num_samples,
         seed=args.seed,

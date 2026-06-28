@@ -42,19 +42,19 @@ Gemma 4, 4-bit inference footprint vs the 24 GB budget:
    into `checkpoints/orpo_gemma4/` and run inference/serving (see notebook's last cell).
 
 ## Dependencies (important — Gemma 4 is bleeding-edge)
-Gemma 4 is `model_type: gemma4_unified`, unsupported by the PyPI `unsloth` (which pins
-`transformers<=5.5`). Install **Unsloth from git and let it choose its own transformers**
-— do NOT pin transformers (a pin like `==5.10.1` conflicts with the git `unsloth_zoo`,
-which currently wants `transformers 5.12.x`):
+Gemma 4 = `model_type: gemma4_unified`, which requires **transformers >= 5.10**. The current
+git `unsloth_zoo` pins `transformers<=5.5.0` (too conservative), so install the Unsloth stack
+first, then **force `transformers==5.10.1` with `--no-deps`** to override the cap (Unsloth's
+official `Gemma4_(12B)_Text` notebook validated transformers==5.10.1 with these git packages):
 
 ```bash
 pip install "unsloth @ git+https://github.com/unslothai/unsloth" \
-            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo"
-pip install bitsandbytes accelerate datasets sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
+            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo" \
+            bitsandbytes accelerate datasets sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
+pip install --no-deps --force-reinstall "transformers==5.10.1"   # gemma4 needs >=5.10; overrides unsloth_zoo cap
 ```
-unsloth-from-git pulls compatible transformers/trl/peft/bitsandbytes/accelerate itself.
-If you already ran a cell with the old transformers in the session: **Runtime → Restart**,
-then run from the install cell.
+The `pip` "unsloth-zoo requires transformers<=5.5.0" warning is **expected and OK**. After this,
+**Runtime → Restart**, then run from the next cell (the `!python` SFT subprocess picks up 5.10.1).
 
 ## Notes
 - **Use the 12B text model** (`unsloth/gemma-4-12b-it`, loaded via Unsloth `FastModel`).

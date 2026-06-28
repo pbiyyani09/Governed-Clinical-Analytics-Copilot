@@ -41,7 +41,24 @@ Gemma 4, 4-bit inference footprint vs the 24 GB budget:
 5. **Local 3090:** download `EHRSQL_GEMMA/checkpoints/orpo_gemma4/adapter_final`
    into `checkpoints/orpo_gemma4/` and run inference/serving (see notebook's last cell).
 
+## Dependencies (important — Gemma 4 is bleeding-edge)
+Gemma 4 is `model_type: gemma4_unified` and requires **`transformers==5.10.1`** plus
+**Unsloth installed from git** (the PyPI `unsloth` pins `transformers<=5.5`, which fails
+with `gemma4_unified not supported in transformers==5.5.0`). The notebook's install cell
+matches Unsloth's official `Gemma4_(12B)_Text` notebook:
+
+```bash
+pip install "unsloth @ git+https://github.com/unslothai/unsloth" \
+            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo" \
+            transformers==5.10.1 trl peft bitsandbytes accelerate datasets \
+            sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
+```
+If you already ran a cell with transformers 5.5.0 in the session: **Runtime → Restart**, then run from the install cell.
+
 ## Notes
+- **Use the 12B text model** (`unsloth/gemma-4-12b-it`, loaded via Unsloth `FastModel`).
+  E2B/E4B are *multimodal* (need `FastVisionModel`) — not this text pipeline. 26B-A4B/31B
+  are text but too big to serve on the 24GB 3090.
 - `qlora_sft` takes `--batch-size`/`--grad-accum` (notebook scales them to VRAM).
 - SFT is 3 epochs because 1 epoch plateaued EX ~0.40 locally; more epochs is the EX lever.
 - The training code already handles Gemma's `token_type_ids` (ORPO) and markdown-fenced

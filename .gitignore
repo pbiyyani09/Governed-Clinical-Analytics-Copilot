@@ -254,3 +254,7 @@ cache/
 .coverage
 htmlcov/
 
+
+# Colab bundle (build artifact)
+ehrsql_gemma_bundle.zip
+*.zip

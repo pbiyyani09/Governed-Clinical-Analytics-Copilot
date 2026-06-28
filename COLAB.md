@@ -50,7 +50,7 @@ which currently wants `transformers 5.12.x`):
 ```bash
 pip install "unsloth @ git+https://github.com/unslothai/unsloth" \
             "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo"
-pip install datasets sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
+pip install bitsandbytes accelerate datasets sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
 ```
 unsloth-from-git pulls compatible transformers/trl/peft/bitsandbytes/accelerate itself.
 If you already ran a cell with the old transformers in the session: **Runtime → Restart**,

@@ -1,32 +1,29 @@
-"""Build DPO preference pairs for Abstention-DPO training.
+"""Build ORPO preference pairs for fine-tuning.
 
-Novel contribution: [ABSTAIN] as the DPO chosen response for unanswerable questions.
-No published EHRSQL system uses this approach.
-
-Two strategies, each addressing a different coverage problem:
-
-For UNANSWERABLE questions (primary abstention contribution):
+For UNANSWERABLE questions:
   chosen   = [ABSTAIN]
-  rejected = randomly sampled gold SQL from an answerable question
-  Rationale: the SFT model already abstains perfectly (temp 1.3 still gives [ABSTAIN]),
-  so we cannot use the model to generate a SQL "rejected" sample. Instead we use a
-  plausible-looking SQL from the answerable set — the DPO loss still correctly teaches
-  the model to prefer [ABSTAIN] over any SQL for unanswerable questions.
+  rejected = model's own inference output (or random gold SQL as fallback)
+  Teaches the model to prefer abstention over its own hallucinated SQL —
+  stronger signal than random gold SQL since the model must unlearn its own wrong answer.
 
 For ANSWERABLE questions (SQL quality):
-  chosen   = gold SQL
-  rejected = model's single greedy output if string-different from gold
-  Avoids execution-based matching (MIMIC-III gold SQL ≠ MIMIC-IV-Demo schema).
-  String-normalized comparison catches most cases where model diverges from gold.
+  chosen   = gold SQL (canonicalized to MIMIC-IV-Demo schema)
+  rejected = model's incorrect output (verified by execution when --verify-execution set)
+
+  IMPORTANT: pairs are ONLY generated when gold SQL executes successfully on our DB.
+  Gold SQL that errors (missing MIMIC-III tables/columns) or returns empty (patient not
+  in MIMIC-IV-Demo) is skipped — using broken gold SQL as "chosen" teaches the model to
+  prefer SQL that cannot execute, which is backwards. With --verify-execution, the model
+  output is also execution-checked so pred==gold (by result) is skipped (no signal).
 
 Usage:
     python -m ehrcopilot.finetune.build_pairs \\
         --train data/ehrsql/ehrsql/mimic_iii/train.json \\
         --valid data/ehrsql/ehrsql/mimic_iii/valid.json \\
-        --adapter checkpoints/sft/adapter_final \\
-        --output data/ehrsql/dpo_pairs.jsonl \\
-        --max-answerable 500 \\
-        --unanswerable-only      # (flag: skip answerable pairs, focus on abstention)
+        --adapter checkpoints/orpo_v4_colab/adapter_final \\
+        --output data/ehrsql/orpo_v5_pairs.jsonl \\
+        --verify-execution \\
+        --inference-rejected
 """
 
 from __future__ import annotations
@@ -110,17 +107,22 @@ def build_pairs(
 ) -> dict[str, int]:
     """Build preference pairs for ORPO/DPO training.
 
-    verify_execution=True: for answerable pairs, skip if model output executes
-      correctly (no preference signal needed). Creates much cleaner pairs than
-      string-diff matching.
-    num_samples > 1: sample K model outputs and pick the first incorrect one
-      as rejected (more diverse rejected candidates).
+    verify_execution=True: for answerable pairs, requires gold SQL to execute with
+      actual data on our DB. Questions where gold errors or returns empty are skipped —
+      broken gold SQL as "chosen" would teach the model to prefer SQL that cannot run.
+      Model output is also execution-checked: if it already matches gold, skip (no signal).
+    num_samples > 1: sample K model outputs and pick the first incorrect one as rejected.
     """
     random.seed(seed)
 
     train_examples = load_ehrsql_split(train_path)
     answerable_examples = [e for e in train_examples if e.is_answerable]
-    gold_sql_pool = [e.gold_sql for e in answerable_examples if e.gold_sql and e.gold_sql.strip()]
+
+    # Build a pool of *canonicalized* valid gold SQL to use as unanswerable rejected fallback.
+    # Only include gold SQL that actually executes with results on our DB — otherwise we're
+    # using broken MIMIC-III SQL as the "rejected" response for abstention pairs.
+    gold_sql_pool_raw = [e.gold_sql for e in answerable_examples if e.gold_sql and e.gold_sql.strip()]
+    gold_sql_pool = [_canonicalize_gold_sql(s) for s in gold_sql_pool_raw]
 
     unanswerable_examples = []
     if valid_path and valid_path.exists():
@@ -132,6 +134,7 @@ def build_pairs(
     print(f"Unanswerable examples: {len(unanswerable_examples)}")
     print(f"Answerable examples (capped at {max_answerable}): {min(len(answerable_examples), max_answerable)}")
     print(f"Mode: {'unanswerable-only' if unanswerable_only else 'unanswerable + answerable'}")
+    print(f"Verify execution: {verify_execution} (skip pairs where gold SQL errors/empty on our DB)")
     print(f"Unanswerable rejected: {'model inference (stronger signal)' if inference_rejected else 'random gold SQL (fast)'}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,9 +143,11 @@ def build_pairs(
         "pairs_written": 0,
         "unanswerable_pairs": 0,
         "answerable_pairs": 0,
-        "skipped_no_diff": 0,
+        "skipped_gold_error": 0,     # gold SQL failed on our DB
+        "skipped_gold_empty": 0,     # gold SQL returned empty (patient not in demo)
+        "skipped_no_diff": 0,        # model output identical to gold (string match)
         "skipped_model_abstained": 0,
-        "skipped_exec_match": 0,
+        "skipped_exec_match": 0,     # model output execution-matches gold
     }
 
     # Pre-load model if needed for either inference-rejected unanswerable or answerable pairs
@@ -206,7 +211,7 @@ def build_pairs(
         if unanswerable_only:
             print("Skipping answerable pairs (--unanswerable-only)")
         else:
-            # ── Answerable DPO pairs (1 model inference per question) ─────────
+            # ── Answerable DPO pairs (verify gold SQL first, then model inference) ──
             if model is None:
                 print("Model not loaded — skipping answerable pairs.")
             else:
@@ -218,49 +223,64 @@ def build_pairs(
                     if i % 100 == 0:
                         print(
                             f"  Answerable {i}/{len(ans_subset)} — "
-                            f"ans_pairs: {stats['answerable_pairs']}",
+                            f"pairs: {stats['answerable_pairs']} "
+                            f"gold_err: {stats['skipped_gold_error']} "
+                            f"gold_empty: {stats['skipped_gold_empty']}",
                             flush=True,
                         )
+
+                    canon_gold = _canonicalize_gold_sql(ex.gold_sql or "")
+                    gold_rows: list | None = None
+                    gold_err: str | None = None
+
+                    if verify_execution:
+                        # Validate gold SQL before anything else.
+                        # Broken gold SQL (MIMIC-III tables/columns missing from MIMIC-IV-Demo)
+                        # cannot be used as "chosen" — it would train the model to prefer SQL
+                        # that cannot execute. Also skip empty gold: patient not in demo means
+                        # we can't verify whether the model's output is actually correct.
+                        gold_rows, gold_err = _exec_safe(canon_gold)
+                        if gold_err is not None:
+                            stats["skipped_gold_error"] += 1
+                            continue
+                        if not gold_rows:
+                            stats["skipped_gold_empty"] += 1
+                            continue
 
                     messages = _build_messages(ex.question)
 
                     # Sample num_samples outputs; pick the first usable rejected candidate
                     model_out = None
-                    gold_rows = None
                     for _s in range(max(1, num_samples)):
                         sample = _sample_one(model, tokenizer, messages, temperature=1.0)
 
                         if sample == ABSTAIN_TOKEN or not sample.strip():
+                            stats["skipped_model_abstained"] += 1
                             continue
 
                         if verify_execution:
-                            if gold_rows is None:
-                                gold_rows, _ = _exec_safe(_canonicalize_gold_sql(ex.gold_sql or ""))
                             pred_rows, pred_err = _exec_safe(sample)
-                            if pred_err is None and results_match(pred_rows, gold_rows):
-                                # Model already gets this right — no signal
+                            if pred_err is None and results_match(
+                                pred_rows, gold_rows, gold_err=gold_err
+                            ):
+                                # Model already gets this right — no preference signal
+                                stats["skipped_exec_match"] += 1
                                 continue
                         else:
-                            if _normalize_sql(sample) == _normalize_sql(ex.gold_sql or ""):
+                            if _normalize_sql(sample) == _normalize_sql(canon_gold):
+                                stats["skipped_no_diff"] += 1
                                 continue
 
                         model_out = sample
                         break
 
                     if model_out is None:
-                        # All samples were abstentions or correct outputs
-                        if _sample_one(model, tokenizer, messages, temperature=1.0) == ABSTAIN_TOKEN:
-                            stats["skipped_model_abstained"] += 1
-                        elif verify_execution:
-                            stats["skipped_exec_match"] += 1
-                        else:
-                            stats["skipped_no_diff"] += 1
                         continue
 
                     pair = {
                         "id": ex.id,
                         "prompt": messages,
-                        "chosen": [{"role": "assistant", "content": ex.gold_sql}],
+                        "chosen": [{"role": "assistant", "content": canon_gold}],
                         "rejected": [{"role": "assistant", "content": model_out}],
                         "is_answerable": True,
                     }

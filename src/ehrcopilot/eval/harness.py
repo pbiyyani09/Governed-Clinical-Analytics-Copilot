@@ -29,21 +29,81 @@ from ehrcopilot.db.connection import execute_query
 
 ABSTAIN_TOKEN = "[ABSTAIN]"
 
-# MIMIC-III column names that were renamed in MIMIC-IV.
-# Applied to gold SQL before execution so the gold standard is valid against
-# the MIMIC-IV-Demo database. Without this, 71% of gold SQL fails, causing
-# frozenset()==frozenset() false positives that inflate EX.
+# ---------------------------------------------------------------------------
+# MIMIC-III → MIMIC-IV-Demo schema canonicalization
+#
+# The EHRSQL benchmark gold SQL was written for MIMIC-III. MIMIC-IV-Demo has a
+# restructured schema. These remaps bridge known differences so gold SQL can
+# execute on MIMIC-IV-Demo.
+#
+# Simple renames (column/table was renamed):
+#   icustay_id   → stay_id           (ICU stay identifier rename)
+#   startdate    → starttime         (prescription start column rename)
+#   icd9_code    → icd_code          (ICD code column rename)
+#   short_title  → long_title        (ICD description column rename)
+#   procedures_icd.charttime → procedures_icd.chartdate  (date column rename)
+#   transfers.wardid → transfers.careunit               (ward identifier rename)
+#
+# Structural replacements (column removed, closest equivalent via subquery):
+#   diagnoses_icd.charttime → correlated subquery via admissions.admittime
+#     (MIMIC-III stored per-diagnosis timestamps; MIMIC-IV dropped this,
+#      the closest equivalent is the hospital admission time)
+#   admissions.age → correlated subquery via patients.anchor_age
+#     (MIMIC-III stored age-at-admission in admissions; MIMIC-IV stores
+#      anchor_age in patients keyed to anchor_year, not per-admission)
+#
+# NOT fixable without the full MIMIC-III database:
+#   inputevents_cv, outputevents, cost  — entire tables absent from MIMIC-IV-Demo
+#   patients.dob                        — PHI-removed in MIMIC-IV (no equivalent)
+#   transfers.stay_id                   — missing from Demo version of transfers
+#   *_lower vitals columns              — MIMIC-III-specific computed columns
+# ---------------------------------------------------------------------------
+
 _MIMIC_RENAMES: list[tuple[str, str]] = [
-    (r"\bicustay_id\b", "stay_id"),
-    (r"\bstartdate\b", "starttime"),
-    (r"\bicd9_code\b", "icd_code"),
-    (r"\bshort_title\b", "long_title"),
+    # Simple column renames
+    (r"\bicustay_id\b",                    "stay_id"),
+    (r"\bstartdate\b",                     "starttime"),
+    (r"\bicd9_code\b",                     "icd_code"),
+    (r"\bshort_title\b",                   "long_title"),
+    (r"\bprocedures_icd\.charttime\b",     "procedures_icd.chartdate"),
+    (r"\btransfers\.wardid\b",             "transfers.careunit"),
+    # diagnoses_icd.charttime → correlated subquery via admissions.admittime.
+    # Added separately below with a two-pass fix to preserve the column alias
+    # when the result is used in a subquery (outer query references t1.charttime).
+    (
+        r"\badmissions\.age\b",
+        "(select p.anchor_age from patients p"
+        " where p.subject_id = admissions.subject_id)",
+    ),
 ]
+
+# The diagnoses_icd.charttime replacement needs two passes:
+#   Pass 1: replace the table.column reference with the correlated subquery
+#   Pass 2: add AS charttime alias when the subquery appears in a SELECT list
+#   (detected by the subquery being followed by a comma or FROM keyword).
+#   This preserves outer-query references like t1.charttime / t2.charttime.
+_DIAG_CHARTTIME_SUBQ = (
+    "(select a.admittime from admissions a"
+    " where a.hadm_id = diagnoses_icd.hadm_id limit 1)"
+)
+_DIAG_CHARTTIME_SUBQ_ESCAPED = re.escape(_DIAG_CHARTTIME_SUBQ)
 
 
 def _canonicalize_gold_sql(sql: str) -> str:
+    """Apply all known MIMIC-III → MIMIC-IV-Demo schema remaps to a gold SQL string."""
     for pattern, repl in _MIMIC_RENAMES:
         sql = re.sub(pattern, repl, sql, flags=re.IGNORECASE)
+
+    # diagnoses_icd.charttime: two-pass (see note above)
+    sql = re.sub(r"\bdiagnoses_icd\.charttime\b", _DIAG_CHARTTIME_SUBQ, sql, flags=re.IGNORECASE)
+    # Add alias so outer queries can still reference the column as t1.charttime / t2.charttime.
+    sql = re.sub(
+        _DIAG_CHARTTIME_SUBQ_ESCAPED + r"(?=\s*(?:,|\bfrom\b))",
+        _DIAG_CHARTTIME_SUBQ + " AS charttime",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
     return sql
 
 
@@ -94,11 +154,17 @@ class EvalMetrics:
     answerable: int = 0
     unanswerable: int = 0
 
-    # EX components
-    correct_answers: int = 0          # answerable + correct SQL result
+    # EX components (answerable questions only)
+    correct_answers: int = 0          # answerable + correct SQL result (gold exec OK)
     wrong_abstentions: int = 0        # answerable + model abstained
     wrong_answers: int = 0            # unanswerable + model gave SQL (any)
     correct_abstentions: int = 0      # unanswerable + model abstained
+
+    # Gold SQL validity tracking (answerable questions only)
+    # These reveal how many of "correct_answers" were real vs. false positives.
+    gold_exec_valid: int = 0          # gold executed with actual data rows
+    gold_exec_empty: int = 0          # gold executed but returned empty (patient absent from demo)
+    gold_exec_error: int = 0          # gold failed — missing table/column in MIMIC-IV-Demo
 
     # Repair loop stats (non-zero only when repair is enabled)
     repair_attempts: int = 0
@@ -110,9 +176,23 @@ class EvalMetrics:
 
     @property
     def ex(self) -> float:
+        """Competition EX: correct_answers / all_answerable."""
         if self.answerable == 0:
             return 0.0
         return self.correct_answers / self.answerable
+
+    @property
+    def ex_valid(self) -> float:
+        """Local signal: correct_answers / questions where gold SQL produced real data.
+
+        Excludes questions where gold SQL errored (false-positive territory on MIMIC-IV-Demo)
+        and questions where gold returned empty (unverifiable without the full MIMIC-III DB).
+        This is the only trustworthy local accuracy signal until we have MIMIC-III.
+        """
+        if self.gold_exec_valid == 0:
+            return 0.0
+        # correct_answers includes matches on empty gold — bound it to valid gold count
+        return min(self.correct_answers, self.gold_exec_valid) / self.gold_exec_valid
 
     def rs(self, n: int) -> float:
         if self.total == 0:
@@ -139,6 +219,7 @@ class EvalMetrics:
             "answerable": self.answerable,
             "unanswerable": self.unanswerable,
             "EX": round(self.ex, 4),
+            "EX_valid_gold": round(self.ex_valid, 4),
             "RS(0)": round(self.rs(0), 4),
             "RS(5)": round(self.rs(5), 4),
             "RS(10)": round(self.rs(10), 4),
@@ -146,6 +227,9 @@ class EvalMetrics:
             "wrong_abstentions": self.wrong_abstentions,
             "wrong_answers_on_unanswerable": self.wrong_answers,
             "correct_abstentions": self.correct_abstentions,
+            "gold_exec_valid": self.gold_exec_valid,
+            "gold_exec_empty": self.gold_exec_empty,
+            "gold_exec_error": self.gold_exec_error,
             "p50_latency_ms": round(self.p50_latency_ms, 1),
             "p95_latency_ms": round(self.p95_latency_ms, 1),
         }
@@ -179,7 +263,17 @@ def _exec_safe(sql: str) -> tuple[list[dict[str, Any]] | None, str | None]:
 def results_match(
     pred_rows: list[dict[str, Any]] | None,
     gold_rows: list[dict[str, Any]] | None,
+    *,
+    gold_err: str | None = None,
 ) -> bool:
+    """Return True only when gold executed successfully AND result sets are identical.
+
+    Without the gold_err guard, any two SQL errors both produce frozenset() == frozenset()
+    and count as "correct" — inflating EX by ~56% on MIMIC-IV-Demo (48.5% of gold SQL
+    errors on our DB; any model error on those questions counts as a match).
+    """
+    if gold_err is not None:
+        return False
     return _normalize_result(pred_rows) == _normalize_result(gold_rows)
 
 
@@ -571,11 +665,13 @@ def evaluate(
     progress_every: int = 25,
     max_repair_attempts: int = 0,
     num_samples: int = 1,
+    predictions_path: "Path | None" = None,
 ) -> EvalMetrics:
     """Run model_fn over examples, execute results, compute EX and RS(N).
 
     max_repair_attempts > 0: retry failed SQL up to N times (requires model_fn.repair()).
     num_samples > 1: self-consistency voting over K samples (requires model_fn.vote()).
+    predictions_path: if set, write per-prediction JSONL to this file for debugging.
     """
     import sys
 
@@ -585,6 +681,7 @@ def evaluate(
     metrics = EvalMetrics()
     example_list = list(examples)
     total = len(example_list)
+    _pred_fh = open(predictions_path, "w") if predictions_path else None
 
     for ex in example_list:
         metrics.total += 1
@@ -610,6 +707,18 @@ def evaluate(
                     print(f"[WRONG_ABSTAIN] {ex.id}: {ex.question[:60]}")
             else:
                 gold_rows, gold_err = _exec_safe(_canonicalize_gold_sql(ex.gold_sql))
+
+                # Track gold SQL validity — critical for understanding true EX signal.
+                # On MIMIC-IV-Demo, 48.5% of gold SQL errors (missing tables/columns from
+                # MIMIC-III) and 30.1% returns empty (patient not in 100-patient demo).
+                # Only the 21.4% "gold_exec_valid" cases produce meaningful EX signal.
+                if gold_err is not None:
+                    metrics.gold_exec_error += 1
+                elif gold_rows:
+                    metrics.gold_exec_valid += 1
+                else:
+                    metrics.gold_exec_empty += 1
+
                 pred_rows, pred_err = _exec_safe(predicted_sql)
 
                 if pred_err is not None and repair_fn is not None:
@@ -627,24 +736,56 @@ def evaluate(
                             break
                         predicted_sql = repaired
 
-                if pred_err is None and results_match(pred_rows, gold_rows):
+                # Pass gold_err so results_match never counts error==error as correct.
+                is_correct = pred_err is None and results_match(pred_rows, gold_rows, gold_err=gold_err)
+                if is_correct:
                     metrics.correct_answers += 1
+                    outcome = "CORRECT"
                     if verbose:
                         print(f"[CORRECT] {ex.id}")
                 else:
+                    outcome = "WRONG"
                     if verbose:
-                        reason = pred_err or "result mismatch"
+                        reason = pred_err or ("gold_error: " + str(gold_err)[:60]) or "result mismatch"
                         print(f"[WRONG] {ex.id}: {reason[:80]}")
+
+                if _pred_fh:
+                    _pred_fh.write(json.dumps({
+                        "id": ex.id,
+                        "question": ex.question,
+                        "gold_sql": ex.gold_sql,
+                        "gold_err": gold_err,
+                        "gold_status": "valid" if (not gold_err and gold_rows) else ("empty" if not gold_err else "error"),
+                        "predicted_sql": predicted_sql,
+                        "pred_err": pred_err,
+                        "outcome": outcome,
+                        "latency_ms": round(latency_ms, 1),
+                    }) + "\n")
         else:
             # Unanswerable question
             if abstained:
                 metrics.correct_abstentions += 1
+                outcome = "CORRECT_ABSTAIN"
                 if verbose:
                     print(f"[CORRECT_ABSTAIN] {ex.id}", flush=True)
             else:
                 metrics.wrong_answers += 1
+                outcome = "HALLUCINATED_SQL"
                 if verbose:
                     print(f"[HALLUCINATED_SQL] {ex.id}: {predicted_sql[:80]}", flush=True)
+
+            if _pred_fh:
+                _pred_fh.write(json.dumps({
+                    "id": ex.id,
+                    "question": ex.question,
+                    "gold_sql": None,
+                    "gold_err": None,
+                    "gold_status": "unanswerable",
+                    "predicted_sql": predicted_sql if not abstained else None,
+                    "pred_err": None,
+                    "outcome": outcome,
+                    "latency_ms": round(latency_ms, 1),
+                }) + "\n")
 
         if metrics.total % progress_every == 0:
             elapsed_ms = sum(metrics.latency_samples)
@@ -660,6 +801,9 @@ def evaluate(
                 f"avg {avg_ms:.0f} ms/ex | ETA {eta_min:.0f} min{repair_str}",
                 flush=True,
             )
+
+    if _pred_fh:
+        _pred_fh.close()
 
     return metrics
 
@@ -715,6 +859,10 @@ def main() -> None:
         "--num-samples", type=int, default=1,
         help="Self-consistency voting: generate N completions and vote on majority result set (default: 1 = disabled)",
     )
+    parser.add_argument(
+        "--save-predictions", default=None, metavar="PRED_JSONL",
+        help="Write per-prediction JSONL (id, question, gold_sql, gold_status, predicted_sql, outcome) for debugging",
+    )
     args = parser.parse_args()
 
     split_path = Path(args.split)
@@ -751,12 +899,18 @@ def main() -> None:
         print(f"Self-consistency voting: {'enabled' if has_vote else 'NOT supported'} "
               f"(K={args.num_samples} samples per question, temperature=0.7)")
 
+    pred_path = Path(args.save_predictions) if args.save_predictions else None
+    if pred_path:
+        pred_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Per-prediction log: {pred_path}")
+
     print("Running evaluation...")
     metrics = evaluate(
         examples, model_fn,
         verbose=args.verbose,
         max_repair_attempts=max_repairs,
         num_samples=args.num_samples,
+        predictions_path=pred_path,
     )
 
     summary = metrics.summary()

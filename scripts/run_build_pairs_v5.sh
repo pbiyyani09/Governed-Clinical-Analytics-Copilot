@@ -82,7 +82,6 @@ python3 -m ehrcopilot.finetune.build_pairs \
     --adapter "$ADAPTER" \
     --output "$OUTPUT_VALID" \
     --max-answerable "$MAX_VALID" \
-    --unanswerable-only=false \
     --verify-execution \
     --num-samples 2 \
     2>&1 | tee logs/v5_valid.log

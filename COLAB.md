@@ -42,18 +42,19 @@ Gemma 4, 4-bit inference footprint vs the 24 GB budget:
    into `checkpoints/orpo_gemma4/` and run inference/serving (see notebook's last cell).
 
 ## Dependencies (important — Gemma 4 is bleeding-edge)
-Gemma 4 is `model_type: gemma4_unified` and requires **`transformers==5.10.1`** plus
-**Unsloth installed from git** (the PyPI `unsloth` pins `transformers<=5.5`, which fails
-with `gemma4_unified not supported in transformers==5.5.0`). The notebook's install cell
-matches Unsloth's official `Gemma4_(12B)_Text` notebook:
+Gemma 4 is `model_type: gemma4_unified`, unsupported by the PyPI `unsloth` (which pins
+`transformers<=5.5`). Install **Unsloth from git and let it choose its own transformers**
+— do NOT pin transformers (a pin like `==5.10.1` conflicts with the git `unsloth_zoo`,
+which currently wants `transformers 5.12.x`):
 
 ```bash
 pip install "unsloth @ git+https://github.com/unslothai/unsloth" \
-            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo" \
-            transformers==5.10.1 trl peft bitsandbytes accelerate datasets \
-            sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
+            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo"
+pip install datasets sentencepiece timm scikit-learn rank-bm25 sqlglot faiss-cpu einops
 ```
-If you already ran a cell with transformers 5.5.0 in the session: **Runtime → Restart**, then run from the install cell.
+unsloth-from-git pulls compatible transformers/trl/peft/bitsandbytes/accelerate itself.
+If you already ran a cell with the old transformers in the session: **Runtime → Restart**,
+then run from the install cell.
 
 ## Notes
 - **Use the 12B text model** (`unsloth/gemma-4-12b-it`, loaded via Unsloth `FastModel`).

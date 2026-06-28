@@ -35,11 +35,11 @@ if [ -n "$_NV_CU13" ] && [ -d "$_NV_CU13" ]; then
 fi
 
 MODE="${1:-all}"
-TRAIN="data/ehrsql/ehrsql/mimic_iii/train.json"
-TEST="data/ehrsql/ehrsql/mimic_iii/test.json"
+TRAIN="data/ehrsql2024/mimic_iv/train"
+TEST="data/ehrsql2024/mimic_iv/test"
 OUTPUT="tests/evalgen/rag_eval_results.json"
-EMBED_CACHE="data/ehrsql/train_embeddings_bge_large.npy"
-CLASSIFIER_CACHE="data/ehrsql/template_classifier.pkl"
+EMBED_CACHE="data/ehrsql2024/train_embeddings_bge_large.npy"
+CLASSIFIER_CACHE="data/ehrsql2024/template_classifier.pkl"
 
 mkdir -p tests/evalgen logs
 

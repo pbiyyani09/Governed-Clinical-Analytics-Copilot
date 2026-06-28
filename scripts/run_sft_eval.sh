@@ -31,9 +31,9 @@ if [ -n "$_NV_CU13" ] && [ -d "$_NV_CU13" ]; then
 fi
 
 OUTPUT="tests/evalgen/sft_results.json"
-SPLIT="data/ehrsql/ehrsql/mimic_iii/test.json"
+SPLIT="data/ehrsql2024/mimic_iv/test"
 ADAPTER="checkpoints/sft/adapter_final"
-TRAIN="data/ehrsql/ehrsql/mimic_iii/train.json"
+TRAIN="data/ehrsql2024/mimic_iv/train"
 REPAIR_FLAG=""
 FEW_SHOT_FLAG=""
 NUM_SAMPLES_FLAG=""

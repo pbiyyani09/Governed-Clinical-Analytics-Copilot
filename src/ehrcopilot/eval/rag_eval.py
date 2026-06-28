@@ -325,8 +325,8 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="RAG retrieval quality evaluation (RAGAS-style)")
-    parser.add_argument("--train", default="data/ehrsql/ehrsql/mimic_iii/train.json")
-    parser.add_argument("--test", default="data/ehrsql/ehrsql/mimic_iii/test.json")
+    parser.add_argument("--train", default="data/ehrsql2024/mimic_iv/train")
+    parser.add_argument("--test", default="data/ehrsql2024/mimic_iv/test")
     parser.add_argument(
         "--mode", default="all",
         choices=["bm25", "embed", "hybrid", "template", "all"],

@@ -29,81 +29,15 @@ from ehrcopilot.db.connection import execute_query
 
 ABSTAIN_TOKEN = "[ABSTAIN]"
 
-# ---------------------------------------------------------------------------
-# MIMIC-III → MIMIC-IV-Demo schema canonicalization
-#
-# The EHRSQL benchmark gold SQL was written for MIMIC-III. MIMIC-IV-Demo has a
-# restructured schema. These remaps bridge known differences so gold SQL can
-# execute on MIMIC-IV-Demo.
-#
-# Simple renames (column/table was renamed):
-#   icustay_id   → stay_id           (ICU stay identifier rename)
-#   startdate    → starttime         (prescription start column rename)
-#   icd9_code    → icd_code          (ICD code column rename)
-#   short_title  → long_title        (ICD description column rename)
-#   procedures_icd.charttime → procedures_icd.chartdate  (date column rename)
-#   transfers.wardid → transfers.careunit               (ward identifier rename)
-#
-# Structural replacements (column removed, closest equivalent via subquery):
-#   diagnoses_icd.charttime → correlated subquery via admissions.admittime
-#     (MIMIC-III stored per-diagnosis timestamps; MIMIC-IV dropped this,
-#      the closest equivalent is the hospital admission time)
-#   admissions.age → correlated subquery via patients.anchor_age
-#     (MIMIC-III stored age-at-admission in admissions; MIMIC-IV stores
-#      anchor_age in patients keyed to anchor_year, not per-admission)
-#
-# NOT fixable without the full MIMIC-III database:
-#   inputevents_cv, outputevents, cost  — entire tables absent from MIMIC-IV-Demo
-#   patients.dob                        — PHI-removed in MIMIC-IV (no equivalent)
-#   transfers.stay_id                   — missing from Demo version of transfers
-#   *_lower vitals columns              — MIMIC-III-specific computed columns
-# ---------------------------------------------------------------------------
-
-_MIMIC_RENAMES: list[tuple[str, str]] = [
-    # Simple column renames
-    (r"\bicustay_id\b",                    "stay_id"),
-    (r"\bstartdate\b",                     "starttime"),
-    (r"\bicd9_code\b",                     "icd_code"),
-    (r"\bshort_title\b",                   "long_title"),
-    (r"\bprocedures_icd\.charttime\b",     "procedures_icd.chartdate"),
-    (r"\btransfers\.wardid\b",             "transfers.careunit"),
-    # diagnoses_icd.charttime → correlated subquery via admissions.admittime.
-    # Added separately below with a two-pass fix to preserve the column alias
-    # when the result is used in a subquery (outer query references t1.charttime).
-    (
-        r"\badmissions\.age\b",
-        "(select p.anchor_age from patients p"
-        " where p.subject_id = admissions.subject_id)",
-    ),
-]
-
-# The diagnoses_icd.charttime replacement needs two passes:
-#   Pass 1: replace the table.column reference with the correlated subquery
-#   Pass 2: add AS charttime alias when the subquery appears in a SELECT list
-#   (detected by the subquery being followed by a comma or FROM keyword).
-#   This preserves outer-query references like t1.charttime / t2.charttime.
-_DIAG_CHARTTIME_SUBQ = (
-    "(select a.admittime from admissions a"
-    " where a.hadm_id = diagnoses_icd.hadm_id limit 1)"
-)
-_DIAG_CHARTTIME_SUBQ_ESCAPED = re.escape(_DIAG_CHARTTIME_SUBQ)
-
 
 def _canonicalize_gold_sql(sql: str) -> str:
-    """Apply all known MIMIC-III → MIMIC-IV-Demo schema remaps to a gold SQL string."""
-    for pattern, repl in _MIMIC_RENAMES:
-        sql = re.sub(pattern, repl, sql, flags=re.IGNORECASE)
+    """No-op: EHRSQL 2024 gold SQL already uses the correct MIMIC-IV column names.
 
-    # diagnoses_icd.charttime: two-pass (see note above)
-    sql = re.sub(r"\bdiagnoses_icd\.charttime\b", _DIAG_CHARTTIME_SUBQ, sql, flags=re.IGNORECASE)
-    # Add alias so outer queries can still reference the column as t1.charttime / t2.charttime.
-    sql = re.sub(
-        _DIAG_CHARTTIME_SUBQ_ESCAPED + r"(?=\s*(?:,|\bfrom\b))",
-        _DIAG_CHARTTIME_SUBQ + " AS charttime",
-        sql,
-        flags=re.IGNORECASE,
-    )
-
+    The EHRSQL 2024 benchmark ships its own SQLite DB (mimic_iv.sqlite) that uses
+    MIMIC-IV naming (stay_id, icd_code, starttime, careunit, admissions.age,
+    diagnoses_icd.charttime) and includes all required tables (cost, inputevents,
+    outputevents). No schema remaps are needed.
+    """
     return sql
 
 
@@ -117,13 +51,13 @@ class EHRSQLExample:
     id: str
     question: str
     gold_sql: str
-    is_answerable: bool  # False for the ~1.9K unanswerable questions
-    tag: str = ""        # abstract template: "what is the intake method of {drug_name}?"
+    is_answerable: bool  # False for unanswerable questions
+    tag: str = ""        # abstract template (EHRSQL 2022 format only)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "EHRSQLExample":
         sql = d.get("sql") or d.get("query") or ""
-        # EHRSQL marks unanswerable questions with query="null" or is_impossible=True
+        # EHRSQL marks unanswerable with query/sql="null" or is_impossible=True
         is_impossible = d.get("is_impossible", False)
         is_answerable = (
             not is_impossible
@@ -283,16 +217,34 @@ def results_match(
 
 
 def load_ehrsql_split(split_path: Path) -> list[EHRSQLExample]:
-    """Load EHRSQL JSON split file. Handles both list and dict-keyed formats."""
+    """Load an EHRSQL split.
+
+    Handles two formats:
+      - Directory (EHRSQL 2024): contains data.json (questions) + label.json (id→sql)
+      - Single JSON file (EHRSQL 2022): list of dicts or {"data": [...]}
+    """
+    split_path = Path(split_path)
+
+    # EHRSQL 2024 directory format: data.json + label.json
+    if split_path.is_dir():
+        with open(split_path / "data.json") as f:
+            data_raw = json.load(f)
+        with open(split_path / "label.json") as f:
+            labels: dict[str, str] = json.load(f)
+
+        examples = data_raw["data"] if "data" in data_raw else data_raw
+        merged = [{"id": ex["id"], "question": ex["question"], "sql": labels.get(ex["id"], "null")}
+                  for ex in examples]
+        return [EHRSQLExample.from_dict(d) for d in merged]
+
+    # Single JSON file (EHRSQL 2022 / legacy format)
     with open(split_path) as f:
         raw = json.load(f)
 
     if isinstance(raw, list):
         return [EHRSQLExample.from_dict(d) for d in raw]
-    # dict format: {"data": [...]}
     if "data" in raw:
         return [EHRSQLExample.from_dict(d) for d in raw["data"]]
-    # fallback: treat as flat dict of id→example
     return [EHRSQLExample.from_dict({**v, "id": k}) for k, v in raw.items()]
 
 
@@ -361,7 +313,7 @@ def build_few_shot_retriever(
     from rank_bm25 import BM25Okapi  # type: ignore[import]
 
     examples = [e for e in load_ehrsql_split(train_path) if e.is_answerable and e.gold_sql]
-    gold_sqls = [_canonicalize_gold_sql(e.gold_sql) for e in examples]
+    gold_sqls = [e.gold_sql for e in examples]
     questions = [e.question for e in examples]
     n = len(examples)
 
@@ -381,7 +333,8 @@ def build_few_shot_retriever(
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if embed_cache is None:
-            embed_cache = train_path.parent / "train_embeddings_bge_large.npy"
+            base = train_path if train_path.is_dir() else train_path.parent
+            embed_cache = base.parent / "train_embeddings_bge_large.npy"
 
         if embed_cache.exists():
             print(f"Loading cached embeddings from {embed_cache}")
@@ -406,7 +359,8 @@ def build_few_shot_retriever(
         from collections import defaultdict
 
         if classifier_cache is None:
-            classifier_cache = train_path.parent / "template_classifier.pkl"
+            base = train_path if train_path.is_dir() else train_path.parent
+            classifier_cache = base.parent / "template_classifier.pkl"
 
         if not classifier_cache.exists():
             raise FileNotFoundError(
@@ -867,7 +821,7 @@ def main() -> None:
 
     split_path = Path(args.split)
     if not split_path.exists():
-        raise FileNotFoundError(f"Split file not found: {split_path}")
+        raise FileNotFoundError(f"Split path not found: {split_path}")
 
     print(f"Loading EHRSQL split: {split_path}")
     examples = load_ehrsql_split(split_path)

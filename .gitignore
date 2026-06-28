@@ -256,3 +256,5 @@ cache/
 .coverage
 htmlcov/
 
+unsloth_compiled_cache/
+data/ehrsql2024/mimic_iv/mimic_iv.sqlite

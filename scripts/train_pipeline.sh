@@ -53,8 +53,8 @@ if [ "$SKIP_PREP" -eq 0 ]; then
     echo ""
     echo "[ STEP 0 ] Preparing SFT training data (MIMIC-IV-compatible)..."
     python3 -m ehrcopilot.finetune.prepare_sft \
-        --train data/ehrsql/ehrsql/mimic_iii/train.json \
-        --valid data/ehrsql/ehrsql/mimic_iii/valid.json \
+        --train data/ehrsql2024/mimic_iv/train \
+        --valid data/ehrsql2024/mimic_iv/valid \
         --output data/ehrsql/sft_train_v2.jsonl \
         2>&1 | tee logs/prepare_sft.log
     echo "[ STEP 0 ] Data prep complete → data/ehrsql/sft_train_v2.jsonl"
@@ -91,8 +91,8 @@ if [ "$SKIP_DPO" -eq 0 ]; then
     echo ""
     echo "[ STEP 2 ] Building Abstention-DPO preference pairs..."
     python3 -m ehrcopilot.finetune.build_pairs \
-        --train data/ehrsql/ehrsql/mimic_iii/train.json \
-        --valid data/ehrsql/ehrsql/mimic_iii/valid.json \
+        --train data/ehrsql2024/mimic_iv/train \
+        --valid data/ehrsql2024/mimic_iv/valid \
         --adapter checkpoints/sft/adapter_final \
         --output data/ehrsql/dpo_pairs.jsonl \
         --max-answerable 500 \
@@ -128,7 +128,7 @@ echo "[ STEP 4 ] Model exported → models/merged/"
 echo ""
 echo "[ STEP 5 ] Running post-DPO evaluation on EHRSQL test set..."
 python3 -m ehrcopilot.eval.harness \
-    data/ehrsql/ehrsql/mimic_iii/test.json \
+    data/ehrsql2024/mimic_iv/test \
     --model models/merged \
     --output tests/evalgen/dpo_results.json \
     2>&1 | tee logs/dpo_eval.log

@@ -7,21 +7,21 @@ For UNANSWERABLE questions:
   stronger signal than random gold SQL since the model must unlearn its own wrong answer.
 
 For ANSWERABLE questions (SQL quality):
-  chosen   = gold SQL (canonicalized to MIMIC-IV-Demo schema)
+  chosen   = gold SQL (already correct for EHRSQL 2024 MIMIC-IV schema)
   rejected = model's incorrect output (verified by execution when --verify-execution set)
 
-  IMPORTANT: pairs are ONLY generated when gold SQL executes successfully on our DB.
-  Gold SQL that errors (missing MIMIC-III tables/columns) or returns empty (patient not
-  in MIMIC-IV-Demo) is skipped — using broken gold SQL as "chosen" teaches the model to
-  prefer SQL that cannot execute, which is backwards. With --verify-execution, the model
-  output is also execution-checked so pred==gold (by result) is skipped (no signal).
+  IMPORTANT: pairs are only generated when gold SQL executes with real data on the DB.
+  Gold SQL that returns empty (patient not in 94-patient subset) is skipped — without a
+  reference result we can't verify whether the model output is actually wrong.
+  With --verify-execution, model output is also execution-checked so pred==gold (by
+  result set) is skipped (no preference signal when model already gets it right).
 
 Usage:
     python -m ehrcopilot.finetune.build_pairs \\
-        --train data/ehrsql/ehrsql/mimic_iii/train.json \\
-        --valid data/ehrsql/ehrsql/mimic_iii/valid.json \\
+        --train data/ehrsql2024/mimic_iv/train \\
+        --valid data/ehrsql2024/mimic_iv/valid \\
         --adapter checkpoints/orpo_v4_colab/adapter_final \\
-        --output data/ehrsql/orpo_v5_pairs.jsonl \\
+        --output data/pairs/orpo_v5_pairs.jsonl \\
         --verify-execution \\
         --inference-rejected
 """
@@ -46,7 +46,6 @@ if os.path.isdir(_conda_cu13) and _conda_cu13 not in os.environ.get("LD_LIBRARY_
 from ehrcopilot import config
 from ehrcopilot.eval.harness import (
     load_ehrsql_split,
-    _canonicalize_gold_sql,
     _exec_safe,
     results_match,
 )
@@ -118,11 +117,9 @@ def build_pairs(
     train_examples = load_ehrsql_split(train_path)
     answerable_examples = [e for e in train_examples if e.is_answerable]
 
-    # Build a pool of *canonicalized* valid gold SQL to use as unanswerable rejected fallback.
-    # Only include gold SQL that actually executes with results on our DB — otherwise we're
-    # using broken MIMIC-III SQL as the "rejected" response for abstention pairs.
-    gold_sql_pool_raw = [e.gold_sql for e in answerable_examples if e.gold_sql and e.gold_sql.strip()]
-    gold_sql_pool = [_canonicalize_gold_sql(s) for s in gold_sql_pool_raw]
+    # Pool of valid gold SQL used as fallback rejected for unanswerable pairs
+    # (when model already abstains and we need a SQL to serve as the "wrong" response).
+    gold_sql_pool = [e.gold_sql for e in answerable_examples if e.gold_sql and e.gold_sql.strip()]
 
     unanswerable_examples = []
     if valid_path and valid_path.exists():
@@ -229,16 +226,14 @@ def build_pairs(
                             flush=True,
                         )
 
-                    canon_gold = _canonicalize_gold_sql(ex.gold_sql or "")
+                    canon_gold = ex.gold_sql or ""
                     gold_rows: list | None = None
                     gold_err: str | None = None
 
                     if verify_execution:
-                        # Validate gold SQL before anything else.
-                        # Broken gold SQL (MIMIC-III tables/columns missing from MIMIC-IV-Demo)
-                        # cannot be used as "chosen" — it would train the model to prefer SQL
-                        # that cannot execute. Also skip empty gold: patient not in demo means
-                        # we can't verify whether the model's output is actually correct.
+                        # Validate gold SQL before anything else. Skip if empty (patient not
+                        # in DB subset) — without a reference result we can't determine whether
+                        # the model's output is actually wrong, so there's no preference signal.
                         gold_rows, gold_err = _exec_safe(canon_gold)
                         if gold_err is not None:
                             stats["skipped_gold_error"] += 1

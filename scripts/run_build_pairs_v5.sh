@@ -1,17 +1,24 @@
 #!/bin/bash
-# Build ORPO v5 preference pairs — clean rebuild from scratch.
+# Build ORPO v5 preference pairs — using the EHRSQL 2024 MIMIC-IV dataset.
 #
-# What's correct this time:
-#   - Gold SQL canonicalized (MIMIC-III→MIMIC-IV schema remaps applied)
-#   - Gold SQL verified: skip if errors OR returns empty on our DB
-#   - Chosen = canonicalized gold SQL (not raw MIMIC-III SQL)
-#   - Rejected = model's own output (stronger signal for abstention pairs)
-#   - Only valid-gold questions produce pairs (no backwards training signal)
+# Data: EHRSQL 2024 (data/ehrsql2024/mimic_iv/)
+#   - train:     5124 Qs (4674 answerable, 450 unanswerable)
+#   - train_aug: 38689 Qs (35356 answerable, 3333 unanswerable)
+#   - valid:     1163 Qs (931 answerable, 232 unanswerable)
+#   - test:      1167 Qs (934 answerable, 233 unanswerable)
 #
-# Data composition:
-#   362 unanswerable  → abstention pairs (model's actual output as rejected)
-#   up to 2784 train answerable where gold executes with real data
-#   ~800 valid answerable where gold executes with real data
+# Gold SQL execution on EHRSQL 2024 DB (no remaps needed — correct schema):
+#   - 89-91% of answerable gold SQL executes with real data
+#   - 9-10% returns empty (patient not in 94-patient subset)
+#   - 0% errors (all tables/columns present)
+#
+# Pair strategy:
+#   Step 1: Abstention pairs from valid+train unanswerable (682 total)
+#           rejected = model's own inference output (stronger signal)
+#   Step 2: SQL quality pairs from valid answerable (max=800)
+#           only where gold executes with data (verify-execution)
+#   Step 3: SQL quality pairs from train answerable (max=5000)
+#           only where gold executes with data (verify-execution)
 #
 # Usage:
 #   bash scripts/run_build_pairs_v5.sh              # full build
@@ -35,17 +42,18 @@ fi
 
 MODE="${1:-full}"
 ADAPTER="checkpoints/orpo_v4_colab/adapter_final"
-TRAIN="data/ehrsql/ehrsql/mimic_iii/train.json"
-VALID="data/ehrsql/ehrsql/mimic_iii/valid.json"
-OUTPUT_ABSTAIN="data/ehrsql/orpo_v5_abstention_pairs.jsonl"
-OUTPUT_VALID="data/ehrsql/orpo_v5_valid_pairs.jsonl"
-OUTPUT_TRAIN="data/ehrsql/orpo_v5_train_pairs.jsonl"
-OUTPUT_FINAL="data/ehrsql/orpo_v5_pairs.jsonl"
+BASE="data/ehrsql2024/mimic_iv"
+TRAIN_DIR="$BASE/train"
+VALID_DIR="$BASE/valid"
+OUTPUT_ABSTAIN="data/pairs/orpo_v5_abstention_pairs.jsonl"
+OUTPUT_VALID="data/pairs/orpo_v5_valid_pairs.jsonl"
+OUTPUT_TRAIN="data/pairs/orpo_v5_train_pairs.jsonl"
+OUTPUT_FINAL="data/pairs/orpo_v5_pairs.jsonl"
 
-mkdir -p data/ehrsql logs
+mkdir -p data/pairs logs
 
 echo "============================================================"
-echo " ORPO v5 Pair Generation (clean rebuild)"
+echo " ORPO v5 Pair Generation (EHRSQL 2024 MIMIC-IV)"
 echo " Adapter: $ADAPTER"
 echo " Mode: $MODE"
 echo " $(date)"
@@ -57,12 +65,12 @@ if [ ! -d "$ADAPTER" ]; then
     exit 1
 fi
 
-# ── Step 1: Abstention pairs (all 362 valid unanswerable, inference-rejected) ──
+# ── Step 1: Abstention pairs (valid unanswerable=232 + train unanswerable=450) ──
 echo ""
-echo "Step 1/3: Abstention pairs (362 unanswerable, model inference as rejected) ..."
+echo "Step 1/3: Abstention pairs (valid+train unanswerable, model inference as rejected) ..."
 python3 -m ehrcopilot.finetune.build_pairs \
-    --train "$TRAIN" \
-    --valid "$VALID" \
+    --train "$TRAIN_DIR" \
+    --valid "$VALID_DIR" \
     --adapter "$ADAPTER" \
     --output "$OUTPUT_ABSTAIN" \
     --unanswerable-only \
@@ -70,15 +78,14 @@ python3 -m ehrcopilot.finetune.build_pairs \
     2>&1 | tee logs/v5_abstention.log
 echo "  Abstention pairs: $(wc -l < "$OUTPUT_ABSTAIN")"
 
-# ── Step 2: SQL quality pairs from valid set (only valid-gold questions) ──
+# ── Step 2: SQL quality pairs from valid set (only questions where gold has data) ──
 MAX_VALID=800
 if [ "$MODE" = "fast" ]; then MAX_VALID=200; fi
 
 echo ""
 echo "Step 2/3: SQL quality pairs from valid set (max=$MAX_VALID, verify-execution) ..."
-echo "  Note: skips questions where gold SQL errors or returns empty (MIMIC-IV-Demo mismatch)"
 python3 -m ehrcopilot.finetune.build_pairs \
-    --train "$VALID" \
+    --train "$VALID_DIR" \
     --adapter "$ADAPTER" \
     --output "$OUTPUT_VALID" \
     --max-answerable "$MAX_VALID" \
@@ -87,7 +94,7 @@ python3 -m ehrcopilot.finetune.build_pairs \
     2>&1 | tee logs/v5_valid.log
 echo "  Valid answerable pairs: $(wc -l < "$OUTPUT_VALID")"
 
-# ── Step 3: SQL quality pairs from train set (only valid-gold questions) ──
+# ── Step 3: SQL quality pairs from train set (only questions where gold has data) ──
 if [ "$MODE" = "fast" ]; then
     echo "Step 3/3: Skipping train pairs (fast mode)"
     cat "$OUTPUT_ABSTAIN" "$OUTPUT_VALID" > "$OUTPUT_FINAL"
@@ -95,9 +102,9 @@ else
     MAX_TRAIN=5000
     echo ""
     echo "Step 3/3: SQL quality pairs from train set (max=$MAX_TRAIN, verify-execution) ..."
-    echo "  Note: only ~2784/9318 train questions have valid gold SQL → expect ~2000-2500 pairs"
+    echo "  ~4185/4674 train answerable questions have valid gold SQL"
     python3 -m ehrcopilot.finetune.build_pairs \
-        --train "$TRAIN" \
+        --train "$TRAIN_DIR" \
         --adapter "$ADAPTER" \
         --output "$OUTPUT_TRAIN" \
         --max-answerable "$MAX_TRAIN" \

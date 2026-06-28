@@ -14,111 +14,108 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"
-SQLITE_DB_PATH = DATA_DIR / "mimic_iv_demo.db"
-EHRSQL_DATA_DIR = DATA_DIR / "ehrsql"
+SQLITE_DB_PATH = DATA_DIR / "ehrsql2024/mimic_iv/mimic_iv.sqlite"
+EHRSQL_DATA_DIR = DATA_DIR / "ehrsql2024/mimic_iv"
 
 # ---------------------------------------------------------------------------
 # Schema allowlist — only these tables/columns are permitted through Layer 2.
-# Derived from MIMIC-IV-Demo v2.2 schema.
+# Derived from the EHRSQL 2024 MIMIC-IV SQLite schema (mimic_iv.sqlite).
+#
+# This is a custom MIMIC-IV schema designed for the EHRSQL 2024 shared task.
+# It uses MIMIC-IV table/column naming (stay_id, icd_code, starttime, careunit)
+# and includes tables absent from MIMIC-IV-Demo: cost, inputevents, outputevents.
 # ---------------------------------------------------------------------------
 
 SCHEMA_ALLOWLIST: dict[str, list[str]] = {
     "patients": [
+        "row_id",
         "subject_id",
         "gender",
-        "anchor_age",
-        "anchor_year",
-        "anchor_year_group",
+        "dob",
         "dod",
     ],
     "admissions": [
+        "row_id",
         "subject_id",
         "hadm_id",
         "admittime",
         "dischtime",
-        "deathtime",
         "admission_type",
         "admission_location",
         "discharge_location",
         "insurance",
         "language",
         "marital_status",
-        "race",
-        "edregtime",
-        "edouttime",
-        "hospital_expire_flag",
-    ],
-    "diagnoses_icd": [
-        "subject_id",
-        "hadm_id",
-        "seq_num",
-        "icd_code",
-        "icd_version",
+        "age",
     ],
     "d_icd_diagnoses": [
+        "row_id",
         "icd_code",
-        "icd_version",
         "long_title",
-    ],
-    "procedures_icd": [
-        "subject_id",
-        "hadm_id",
-        "seq_num",
-        "chartdate",
-        "icd_code",
-        "icd_version",
     ],
     "d_icd_procedures": [
+        "row_id",
         "icd_code",
-        "icd_version",
         "long_title",
     ],
-    "labevents": [
-        "labevent_id",
-        "subject_id",
-        "hadm_id",
-        "specimen_id",
-        "itemid",
-        "charttime",
-        "storetime",
-        "value",
-        "valuenum",
-        "valueuom",
-        "ref_range_lower",
-        "ref_range_upper",
-        "flag",
-        "priority",
-        "comments",
-    ],
     "d_labitems": [
+        "row_id",
         "itemid",
         "label",
-        "fluid",
-        "category",
     ],
-    "prescriptions": [
+    "d_items": [
+        "row_id",
+        "itemid",
+        "label",
+        "abbreviation",
+        "linksto",
+    ],
+    "diagnoses_icd": [
+        "row_id",
         "subject_id",
         "hadm_id",
-        "pharmacy_id",
-        "poe_id",
-        "poe_seq",
+        "icd_code",
+        "charttime",
+    ],
+    "procedures_icd": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "icd_code",
+        "charttime",
+    ],
+    "labevents": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "itemid",
+        "charttime",
+        "valuenum",
+        "valueuom",
+    ],
+    "chartevents": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "stay_id",
+        "itemid",
+        "charttime",
+        "valuenum",
+        "valueuom",
+    ],
+    "prescriptions": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
         "starttime",
         "stoptime",
-        "drug_type",
         "drug",
-        "formulary_drug_cd",
-        "gsn",
-        "ndc",
-        "prod_strength",
-        "form_rx",
         "dose_val_rx",
         "dose_unit_rx",
-        "form_val_disp",
-        "form_unit_disp",
-        "doses_per_24_hrs",
         "route",
     ],
     "icustays": [
+        "row_id",
         "subject_id",
         "hadm_id",
         "stay_id",
@@ -126,87 +123,9 @@ SCHEMA_ALLOWLIST: dict[str, list[str]] = {
         "last_careunit",
         "intime",
         "outtime",
-        "los",
-    ],
-    "chartevents": [
-        "subject_id",
-        "hadm_id",
-        "stay_id",
-        "itemid",
-        "charttime",
-        "storetime",
-        "value",
-        "valuenum",
-        "valueuom",
-        "warning",
-    ],
-    "d_items": [
-        "itemid",
-        "label",
-        "abbreviation",
-        "linksto",
-        "category",
-        "unitname",
-        "param_type",
-        "lownormalvalue",
-        "highnormalvalue",
-    ],
-    "microbiologyevents": [
-        "microevent_id",
-        "subject_id",
-        "hadm_id",
-        "micro_specimen_id",
-        "chartdate",
-        "charttime",
-        "spec_itemid",
-        "spec_type_desc",
-        "test_seq",
-        "storedate",
-        "storetime",
-        "test_itemid",
-        "test_name",
-        "org_itemid",
-        "org_name",
-        "isolate_num",
-        "quantity",
-        "ab_itemid",
-        "ab_name",
-        "dilution_text",
-        "dilution_comparison",
-        "dilution_value",
-        "interpretation",
-        "comments",
-    ],
-    "pharmacy": [
-        "subject_id",
-        "hadm_id",
-        "pharmacy_id",
-        "poe_id",
-        "starttime",
-        "stoptime",
-        "medication",
-        "proc_type",
-        "status",
-        "entertime",
-        "verifiedtime",
-        "route",
-        "frequency",
-        "disp_sched",
-        "infusion_type",
-        "sliding_scale",
-        "lockout_interval",
-        "basal_rate",
-        "one_hr_max",
-        "doses_per_24_hrs",
-        "duration",
-        "duration_interval",
-        "expiration_value",
-        "expiration_unit",
-        "expirationdate",
-        "dispensation",
-        "fill_quantity",
     ],
     "transfers": [
+        "row_id",
         "subject_id",
         "hadm_id",
         "transfer_id",
@@ -215,7 +134,44 @@ SCHEMA_ALLOWLIST: dict[str, list[str]] = {
         "intime",
         "outtime",
     ],
-    # edstays is not included in MIMIC-IV-Demo v2.2 (only in full MIMIC-IV)
+    "microbiologyevents": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "charttime",
+        "spec_type_desc",
+        "test_name",
+        "org_name",
+    ],
+    "inputevents": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "stay_id",
+        "starttime",
+        "itemid",
+        "totalamount",
+        "totalamountuom",
+    ],
+    "outputevents": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "stay_id",
+        "charttime",
+        "itemid",
+        "value",
+        "valueuom",
+    ],
+    "cost": [
+        "row_id",
+        "subject_id",
+        "hadm_id",
+        "event_type",
+        "event_id",
+        "chargetime",
+        "cost",
+    ],
 }
 
 # All valid table names — derived from allowlist
@@ -224,15 +180,16 @@ ALLOWED_TABLES: frozenset[str] = frozenset(SCHEMA_ALLOWLIST.keys())
 # ---------------------------------------------------------------------------
 # PHI column denylist — hard block in Layer 3, regardless of table.
 # Based on HIPAA Safe Harbor identifiers applicable to the MIMIC schema.
+# dob is in the DB but is blocked — queries should use admissions.age instead.
 # ---------------------------------------------------------------------------
 
 PHI_COLUMNS: frozenset[str] = frozenset(
     {
+        "dob",
+        "date_of_birth",
         "name",
         "first_name",
         "last_name",
-        "dob",
-        "date_of_birth",
         "ssn",
         "social_security",
         "phone",
@@ -280,7 +237,7 @@ CACHE_TTL_SECONDS: int = int(os.getenv("EHRCOPILOT_CACHE_TTL", str(24 * 3600))) 
 CACHE_EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
 
 # Bump this when schema changes to invalidate all cache entries.
-DB_VERSION: int = 1
+DB_VERSION: int = 2
 
 # ---------------------------------------------------------------------------
 # Agent / inference
@@ -303,9 +260,7 @@ CONFIDENCE_THRESHOLD: float = float(os.getenv("EHRCOPILOT_CONF_THRESHOLD", "0.5"
 # Schema prompt helper
 # ---------------------------------------------------------------------------
 
-
-# Foreign key relationships between MIMIC-IV-Demo tables.
-# Included in schema prompts to help the model find join paths without guessing.
+# Foreign key relationships — shown in prompts to help the model find join paths.
 _FK_HINTS: str = (
     "Foreign keys: "
     "admissions.subject_id→patients.subject_id | "
@@ -321,15 +276,25 @@ _FK_HINTS: str = (
     "chartevents.stay_id→icustays.stay_id | "
     "chartevents.itemid→d_items.itemid | "
     "microbiologyevents.hadm_id→admissions.hadm_id | "
-    "pharmacy.hadm_id→admissions.hadm_id | "
+    "inputevents.stay_id→icustays.stay_id | "
+    "inputevents.itemid→d_items.itemid | "
+    "outputevents.stay_id→icustays.stay_id | "
+    "outputevents.itemid→d_items.itemid | "
+    "cost.hadm_id→admissions.hadm_id | "
     "transfers.hadm_id→admissions.hadm_id"
 )
+
+# Schema shown to the model excludes PHI columns (dob is blocked by Layer 3).
+_PROMPT_SCHEMA: dict[str, list[str]] = {
+    tbl: [c for c in cols if c not in PHI_COLUMNS]
+    for tbl, cols in SCHEMA_ALLOWLIST.items()
+}
 
 
 def schema_to_prompt(linked_schema: dict[str, list[str]] | None = None) -> str:
     """Serialize schema (or a linked subset) into a compact prompt string with FK hints."""
-    source = linked_schema if linked_schema else SCHEMA_ALLOWLIST
-    lines: list[str] = ["Database schema (MIMIC-IV-Demo):"]
+    source = linked_schema if linked_schema else _PROMPT_SCHEMA
+    lines: list[str] = ["Database schema (EHRSQL-MIMIC-IV):"]
     for table, cols in source.items():
         lines.append(f"  {table}({', '.join(cols)})")
     lines.append(_FK_HINTS)
@@ -344,7 +309,7 @@ def schema_to_prompt(linked_schema: dict[str, list[str]] | None = None) -> str:
 
 SYSTEM_PROMPT: str = (
     "You are a clinical analytics assistant. Convert the user's question into "
-    "a valid SQLite SELECT query over the MIMIC-IV-Demo database.\n\n"
+    "a valid SQLite SELECT query over the EHRSQL-MIMIC-IV database.\n\n"
     "Output exactly [ABSTAIN] — nothing else — when the question asks about "
     "information NOT derivable from the schema below. This includes: "
     "doctor or provider identities, family history, drug side effects or "

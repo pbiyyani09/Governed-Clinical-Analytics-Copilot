@@ -210,8 +210,32 @@ def results_match(
 # ---------------------------------------------------------------------------
 
 
+def load_ehrsql2024_split(dir_path: Path) -> list[EHRSQLExample]:
+    """Load an EHRSQL-2024 split *directory*: data.json ({"data":[{id,question}]})
+    + label.json ({id: sql | "null"}). label.json may be absent (blind test set)."""
+    with open(dir_path / "data.json") as f:
+        data = json.load(f)
+    recs = data["data"] if isinstance(data, dict) and "data" in data else data
+    label_file = dir_path / "label.json"
+    labels = json.load(open(label_file)) if label_file.exists() else {}
+    out: list[EHRSQLExample] = []
+    for r in recs:
+        rid = str(r["id"])
+        sql = labels.get(rid, "")
+        is_ans = str(sql).strip().lower() not in ("", "null", "none", "n/a")
+        out.append(EHRSQLExample(
+            id=rid, question=r["question"],
+            gold_sql=sql if is_ans else "", is_answerable=is_ans,
+        ))
+    return out
+
+
 def load_ehrsql_split(split_path: Path) -> list[EHRSQLExample]:
-    """Load EHRSQL JSON split file. Handles both list and dict-keyed formats."""
+    """Load an EHRSQL split. A *directory* is the EHRSQL-2024 layout (data.json +
+    label.json); a *file* is the legacy EHRSQL-2022 JSON (list or dict-keyed)."""
+    if Path(split_path).is_dir():
+        return load_ehrsql2024_split(Path(split_path))
+
     with open(split_path) as f:
         raw = json.load(f)
 
@@ -402,12 +426,7 @@ def run_hf_baseline(
     """
     import torch
 
-    system_prompt = (
-        "You are a clinical analytics assistant. Convert the user's question into "
-        "a valid SQLite SELECT query over the MIMIC-IV-Demo database. "
-        "If the question cannot be answered with the available data, output exactly: [ABSTAIN]\n\n"
-        + config.schema_to_prompt()
-    )
+    system_prompt = config.system_prompt()
 
     import os as _os
     use_unsloth = (

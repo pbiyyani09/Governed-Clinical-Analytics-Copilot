@@ -240,6 +240,8 @@ checkpoints/
 
 # EHRSQL raw data (CC-BY; distribute license not data)
 data/ehrsql/
+# EHRSQL-2024 (MIMIC-IV Demo) vendored data + augmented train + sqlite — license forbids redistribution
+data/ehrsql2024/
 
 # Environment and secrets
 .env

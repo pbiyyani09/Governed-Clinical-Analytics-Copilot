@@ -54,22 +54,13 @@ from ehrcopilot.eval.harness import (
     results_match,
 )
 
-ABSTAIN_TOKEN = "[ABSTAIN]"
+ABSTAIN_TOKEN = config.ABSTAIN_TOKEN
 
 
 def _build_messages(question: str) -> list[dict]:
-    # Use full schema — matches what eval harness and SFT training see
-    schema_text = config.schema_to_prompt()
+    # Canonical system prompt — identical to SFT data + eval (train/inference parity).
     return [
-        {
-            "role": "system",
-            "content": (
-                "You are a clinical analytics SQL expert. Convert the user's question "
-                "into a valid SQLite SELECT query.\n"
-                f"If the question cannot be answered, output exactly: {ABSTAIN_TOKEN}\n\n"
-                f"{schema_text}"
-            ),
-        },
+        {"role": "system", "content": config.system_prompt()},
         {"role": "user", "content": question},
     ]
 

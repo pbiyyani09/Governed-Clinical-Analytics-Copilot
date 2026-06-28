@@ -1,49 +1,48 @@
-# Colab heavy-training workflow (RTX 6000 Pro 95 GB) + local 3090 inference
+# Colab Gemma 4 fine-tune + eval → local RTX 3090 inference
 
-**Policy:** heavy/slow training that the local RTX 3090 (24 GB) can't do quickly
-runs on the Colab RTX 6000 Pro (95 GB). Everything else — retrieval, evaluation,
-and the **final product's inference** — runs on the local 3090. Gemma 3 12B at
-4-bit is ~8 GB, so the fine-tuned adapter serves comfortably on the 3090.
+**Policy:** Colab (Pro+ GPU) does **fine-tuning and evaluation only**. The final/
+production **inference runs on the local RTX 3090 (24 GB)**. The trained artifact is
+a small LoRA adapter (~0.5 GB) that serves on the 3090.
 
-## When to use Colab
-- Multi-epoch SFT (e.g. 3 epochs ≈ 22 h on the 3090 vs a few hours on the 95 GB card).
-- Larger models (gemma-3-27b) or full (non-LoRA) fine-tuning.
-- Anything that OOMs or is too slow at bs=1 on 24 GB.
+## Model choice (constraint: must run inference on a 24 GB 3090)
+Gemma 4, 4-bit inference footprint vs the 24 GB budget:
 
-Light fine-tunes, the inference-time experiments, retrieval ablations, and serving
-stay local.
+| model | HF id (trainable) | 4-bit | fits 3090? |
+|---|---|---|---|
+| **Gemma 4 12B** (recommended — largest that fits) | `unsloth/gemma-4-12b-it` | 6.7 GB | ✅ (4-bit; 8-bit 13.4 GB also fits) |
+| Gemma 4 E4B (faster) | `unsloth/gemma-4-E4B-it` | 4.5 GB | ✅ |
+| Gemma 4 E2B (fastest) | `google/gemma-4-E2B-it` | 2.9 GB | ✅ |
+| Gemma 4 31B / 26B-A4B | (unsloth mirrors) | ~13–16 GB | ⚠️ tight/slow — not recommended |
 
-## One-time setup
-1. Local: `bash scripts/prepare_colab_bundle.sh` → produces `colab_bundle.tar.gz`
-   (code + EHRSQL data + the built `mimic_iv_demo.db`, ~165 MB).
-2. Upload it to Google Drive at `MyDrive/ehrcopilot/colab_bundle.tar.gz`.
-3. In Colab: **Settings → Secrets → add `HF_TOKEN`** (your HF token; grants the
-   gated Gemma models). Enable "Notebook access".
+**12B is the max** for comfortable 3090 inference; the notebook defaults to it.
 
-## Run
-Open `notebooks/gemma_finetune_colab.ipynb` in Colab (on the 95 GB runtime) and
-**Run all**. It:
-1. mounts Drive and extracts the bundle to the **local Colab disk** (`/content/ehrcopilot`),
-2. installs deps, reads `HF_TOKEN` from Colab Secrets,
-3. auto-scales the batch size to the GPU (bs=16 on a 95 GB card),
-4. runs **SFT (3 epochs) → ORPO pairs → Abstention-ORPO → quick eval**,
-5. copies `checkpoints/{sft_gemma,orpo_gemma}` **back to Drive**.
+## Drive flow (exactly your setup)
+- Big (5 TB) account: hold the data; **share the folder `EHRSQL_GEMMA`** (with edit
+  access) to the Colab Pro+ account.
+- Colab account Drive (15 GB): folder **`ehrsql/`** contains a **shortcut** to
+  `EHRSQL_GEMMA`. So in Colab the path is
+  `/content/drive/MyDrive/ehrsql/EHRSQL_GEMMA/`.
+- Files written back (LoRA adapters ~0.5–1 GB, eval JSON) are small → safely under
+  the 15 GB Colab-account quota. (Do **not** save merged full models there.)
 
-## Back on the local 3090
-Download `MyDrive/ehrcopilot/checkpoints/orpo_gemma/adapter_final` into
-`checkpoints/orpo_gemma/adapter_final`, then evaluate / serve locally:
+## Steps
+1. **Local:** `bash scripts/prepare_colab_bundle.sh` → `ehrsql_gemma_bundle.zip`
+   (code + EHRSQL data + the 109 MB `mimic_iv_demo.db`).
+2. Upload the zip into the **shared `EHRSQL_GEMMA` folder** (via your 5 TB account).
+3. **Colab:** add a Secret named `HF_TOKEN` (gated Gemma 4 access; enable notebook access).
+4. Open **`notebooks/gemma4_finetune_eval_colab.ipynb`** → set `MODEL` (default
+   `unsloth/gemma-4-12b-it`) → **Run all**. It:
+   - mounts Drive, unzips the bundle to the **local Colab disk**,
+   - installs latest Unsloth (Gemma 4 support), reads `HF_TOKEN`,
+   - auto-scales batch to the GPU,
+   - runs **SFT (3 epochs) → ORPO pairs → Abstention-ORPO → full 1786 eval**,
+   - copies `checkpoints/{sft_gemma4,orpo_gemma4}` + the eval JSON **back to
+     `EHRSQL_GEMMA/`**.
+5. **Local 3090:** download `EHRSQL_GEMMA/checkpoints/orpo_gemma4/adapter_final`
+   into `checkpoints/orpo_gemma4/` and run inference/serving (see notebook's last cell).
 
-```bash
-PYTHONPATH=src python -m ehrcopilot.eval.harness \
-  data/ehrsql/ehrsql/mimic_iii/test.json \
-  --model checkpoints/orpo_gemma/adapter_final \
-  --few-shot data/ehrsql/ehrsql/mimic_iii/train.json \
-  --retrieval-mode classifier --repair \
-  --output tests/evalgen/gemma_orpo_full.json
-```
-
-Notes
-- `qlora_sft` now takes `--batch-size` / `--grad-accum` so the big GPU is utilized;
-  the 3090 path keeps bs=1 (defaults).
-- The local 1-epoch run on the 3090 (in progress) gives a baseline; Colab is for
-  the 3-epoch / larger runs if EX needs to climb past it.
+## Notes
+- `qlora_sft` takes `--batch-size`/`--grad-accum` (notebook scales them to VRAM).
+- SFT is 3 epochs because 1 epoch plateaued EX ~0.40 locally; more epochs is the EX lever.
+- The training code already handles Gemma's `token_type_ids` (ORPO) and markdown-fenced
+  SQL (eval); the same code path that ran Gemma 3 locally runs Gemma 4 on Colab.

@@ -442,7 +442,9 @@ def run_hf_baseline(
 
             def _generate(self, msgs: list[dict], temperature: float = 0.0) -> str:
                 prompt = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-                inp = tokenizer(prompt, return_tensors="pt").to(model.device)
+                # Gemma 3/4 load a *multimodal* processor whose first positional arg is `images`;
+                # pass the prompt via text= so it isn't mis-routed to the image decoder.
+                inp = tokenizer(text=prompt, return_tensors="pt").to(model.device)
                 do_sample = temperature > 0.0
                 with torch.no_grad():
                     out = model.generate(

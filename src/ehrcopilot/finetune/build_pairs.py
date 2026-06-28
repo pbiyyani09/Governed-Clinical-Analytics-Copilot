@@ -93,7 +93,9 @@ def _sample_one(
     prompt_str = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
+    # Gemma 3/4 load a *multimodal* processor whose first positional arg is `images`;
+    # pass the prompt via text= so it isn't mis-routed to the image decoder.
+    inputs = tokenizer(text=prompt_str, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(
             **inputs,

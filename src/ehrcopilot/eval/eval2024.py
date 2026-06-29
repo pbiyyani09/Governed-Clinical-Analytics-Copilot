@@ -53,6 +53,19 @@ def _exec_error(sql: str, db_path: str) -> str | None:
         return str(exc)
 
 
+def _exec_status(sql: str, db_path: str) -> tuple[bool, bool]:
+    """Return (executes_ok, nonempty) for the execution-based abstention gate."""
+    try:
+        con = sqlite3.connect(db_path)
+        con.text_factory = lambda b: b.decode(errors="ignore")
+        rows = con.execute(sql).fetchall()
+        con.close()
+        nonempty = bool(rows) and any(any(v not in (None, 0, "0", "") for v in r) for r in rows)
+        return True, nonempty
+    except Exception:
+        return False, False
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="EHRSQL-2024 eval (official RS parity)")
     p.add_argument("split", help="2024 split dir (contains data.json [+ label.json])")
@@ -60,6 +73,11 @@ def main() -> None:
     p.add_argument("--few-shot", default=None, help="2024 train dir for few-shot retrieval")
     p.add_argument("--retrieval-mode", default="embed", choices=["bm25", "embed", "hybrid"])
     p.add_argument("--repair", action="store_true", help="execution-guided repair loop")
+    p.add_argument(
+        "--exec-gate", default="error", choices=["off", "error", "empty", "both"],
+        help="Execution-based abstention (the top-team RS(10) lever): after repair, abstain on "
+             "SQL that errors ('error'), returns empty ('empty'), or either ('both'). Default: error.",
+    )
     p.add_argument("--db", default=str(config.SQLITE_DB_PATH))
     p.add_argument("--output", default=None, help="metrics JSON path")
     p.add_argument("--pred-output", default=None, help="prediction.json path (Codabench format)")
@@ -99,6 +117,15 @@ def main() -> None:
                     pred = "null"
                     break
                 pred = rpred
+        # Execution-based abstention gate — the highest-ROI RS(10) lever (LG/KAIST: +155 on dev).
+        # After repair, abstain on SQL that still errors (and optionally returns empty) instead of
+        # submitting a broken query and eating the -10 penalty.
+        if pred != "null" and args.exec_gate != "off":
+            ok, nonempty = _exec_status(pred, args.db)
+            if (not ok and args.exec_gate in ("error", "both")) or (
+                ok and not nonempty and args.exec_gate in ("empty", "both")
+            ):
+                pred = "null"
         pred_dict[e.id] = pred
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(examples)}  ({(time.time()-t0)/(i+1):.2f}s/ex)", flush=True)

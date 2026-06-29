@@ -179,10 +179,15 @@ class EvalMetrics:
 
 
 def _normalize_result(rows: list[dict[str, Any]] | None) -> frozenset[tuple[Any, ...]]:
-    """Order-independent comparison of SQL result sets."""
+    """Order-independent comparison of SQL result sets.
+
+    Column names are lowercased so that identical SQL written in different cases
+    (e.g. gold 'SELECT COUNT(*)>0' vs model 'select count(*)>0') produces matching
+    result sets regardless of the alias casing SQLite returns.
+    """
     if not rows:
         return frozenset()
-    return frozenset(tuple(sorted(row.items())) for row in rows)
+    return frozenset(tuple(sorted((k.lower(), v) for k, v in row.items())) for row in rows)
 
 
 def _exec_safe(sql: str) -> tuple[list[dict[str, Any]] | None, str | None]:

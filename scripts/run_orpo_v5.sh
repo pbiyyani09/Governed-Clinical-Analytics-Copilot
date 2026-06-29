@@ -32,7 +32,7 @@ if [ -n "$_NV_CU13" ] && [ -d "$_NV_CU13" ]; then
     echo "LD_LIBRARY_PATH set: $_NV_CU13"
 fi
 
-PAIRS="data/ehrsql/orpo_v5_pairs.jsonl"
+PAIRS="data/pairs/orpo_v5_pairs.jsonl"
 ADAPTER="checkpoints/orpo_v4_colab/adapter_final"
 OUTPUT="checkpoints/orpo_v5"
 EPOCHS=1
@@ -94,4 +94,4 @@ echo "  bash scripts/run_sft_eval.sh \\"
 echo "    --adapter $OUTPUT/adapter_final \\"
 echo "    --output tests/evalgen/orpo_v5_results.json \\"
 echo "    --repair --few-shot --retrieval-mode template \\"
-echo "    --classifier-cache data/ehrsql/template_classifier.pkl"
+echo "    --classifier-cache data/ehrsql2024/template_classifier.pkl"

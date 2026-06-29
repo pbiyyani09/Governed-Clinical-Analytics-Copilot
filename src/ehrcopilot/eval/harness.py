@@ -182,8 +182,20 @@ class EvalMetrics:
 # ---------------------------------------------------------------------------
 
 
+# Sentinel for an execution ERROR — must NOT compare equal to a legitimately empty
+# result set. Without this, results_match(error, empty)==True, which is a reward hack
+# for GRPO (an erroring SQL "matches" an empty gold) and clusters errors with empties
+# during self-consistency voting. Real rows normalize to frozensets of (key,value)-pair
+# tuples, so this 1-string-tuple sentinel can never collide with a real result.
+_EXEC_ERROR_SENTINEL: frozenset = frozenset({("\x00exec_error\x00",)})
+
+
 def _normalize_result(rows: list[dict[str, Any]] | None) -> frozenset[tuple[Any, ...]]:
-    """Order-independent comparison of SQL result sets."""
+    """Order-independent comparison of SQL result sets.
+
+    Distinguishes execution ERROR (rows is None) from an empty result set ([])."""
+    if rows is None:
+        return _EXEC_ERROR_SENTINEL
     if not rows:
         return frozenset()
     return frozenset(tuple(sorted(row.items())) for row in rows)
@@ -522,8 +534,13 @@ def run_hf_baseline(
                 if abstain_count >= math.ceil(num_samples / 2):
                     return ABSTAIN_TOKEN
 
-                # Execute non-abstain predictions and vote on result sets
-                result_counts: list[tuple[frozenset, str]] = []
+                # Execute non-abstain predictions and vote on result sets.
+                # Cluster by executed result (two different SQLs with the same result set
+                # count as one vote); errors are dropped, not clustered with empties.
+                from collections import Counter
+
+                result_counter: Counter = Counter()
+                rep_sql: dict = {}  # result-key -> representative SQL (first seen)
                 for pred in preds:
                     if pred == ABSTAIN_TOKEN or not pred:
                         continue
@@ -531,27 +548,20 @@ def run_hf_baseline(
                     if err is not None:
                         continue
                     key = _normalize_result(rows)
-                    # Find if this result set was seen before
-                    for i, (existing_key, _) in enumerate(result_counts):
-                        if existing_key == key:
-                            result_counts[i] = (key, result_counts[i][1])
-                            break
-                    else:
-                        result_counts.append((key, pred))
+                    result_counter[key] += 1
+                    rep_sql.setdefault(key, pred)
 
-                if not result_counts:
+                if not result_counter:
                     # All non-abstain predictions failed execution — fall back to first non-abstain
                     for pred in preds:
                         if pred != ABSTAIN_TOKEN and pred:
                             return pred
                     return ABSTAIN_TOKEN
 
-                # Return SQL from the most common result set (stable: first occurrence wins ties)
-                best_key = max(
-                    (k for k, _ in result_counts),
-                    key=lambda k: sum(1 for rk, _ in result_counts if rk == k),
-                )
-                return next(sql for k, sql in result_counts if k == best_key)
+                # Most common result set wins; Counter.most_common is stable so ties go to
+                # the first-seen result (deterministic).
+                best_key = result_counter.most_common(1)[0][0]
+                return rep_sql[best_key]
 
         return _UnslothPredictor()
 

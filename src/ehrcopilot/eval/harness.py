@@ -422,6 +422,59 @@ ModelFn = Callable[[str], str]
 or the literal string "[ABSTAIN]"."""
 
 
+# ---------------------------------------------------------------------------
+# Confidence features for the selective-prediction gate (computed at generation time)
+#   - max-token entropy  (LG/KAIST signal)
+#   - mean of the bottom-k chosen-token log-probs, excluding SQL keyword tokens (ProbGate)
+# These are emitted per prediction (eval2024 --dump-features) and consumed OFFLINE/CPU by
+# scripts/eda/calibrate_gate.py to fit a conformal abstention threshold on the valid split.
+# ---------------------------------------------------------------------------
+_SQL_KEYWORDS = {
+    "select", "from", "where", "group", "by", "order", "having", "limit", "distinct",
+    "count", "sum", "avg", "min", "max", "join", "left", "inner", "outer", "on", "and",
+    "or", "not", "in", "as", "is", "null", "between", "like", "case", "when", "then",
+    "else", "end", "union", "all", "asc", "desc", "exists", "with",
+}
+
+
+def _sql_keyword_token_ids(tokenizer) -> set[int]:
+    """Token ids that encode SQL keywords (best-effort, several surface variants)."""
+    ids: set[int] = set()
+    for kw in _SQL_KEYWORDS:
+        for variant in (kw, " " + kw, kw.upper(), " " + kw.upper()):
+            try:
+                for tid in tokenizer.encode(variant, add_special_tokens=False):
+                    ids.add(int(tid))
+            except Exception:
+                pass
+    return ids
+
+
+def _confidence_features(scores, gen_ids, keyword_ids: set[int]) -> dict | None:
+    """From generate() per-step logits (`scores`) and the chosen token ids, compute
+    (max_token_entropy, mean bottom-10 chosen log-prob excluding SQL keywords)."""
+    import torch
+
+    n = min(len(scores), int(gen_ids.shape[0]))
+    if n == 0:
+        return None
+    max_ent = 0.0
+    chosen: list[tuple[float, int]] = []
+    for t in range(n):
+        logits = scores[t][0].float()
+        lp = torch.log_softmax(logits, dim=-1)
+        ent = float(-(lp.exp() * lp).sum())
+        if ent > max_ent:
+            max_ent = ent
+        tid = int(gen_ids[t])
+        chosen.append((float(lp[tid]), tid))
+    non_kw = [v for v, tid in chosen if tid not in keyword_ids]
+    pool = sorted(non_kw if non_kw else [v for v, _ in chosen])
+    k = min(10, len(pool))
+    blp = sum(pool[:k]) / k if k else 0.0
+    return {"max_entropy": round(max_ent, 4), "bottom10_logprob": round(blp, 4), "n_gen_tokens": n}
+
+
 def run_hf_baseline(
     model_name: str = config.INFERENCE_MODEL,
     few_shot_retriever: "Callable[[str], str] | None" = None,
@@ -467,9 +520,13 @@ def run_hf_baseline(
             load_in_4bit=True,
         )
         FastLanguageModel.for_inference(model)
+        _kw_ids = _sql_keyword_token_ids(tokenizer)
 
         class _UnslothPredictor:
             """Callable model function with repair and optional few-shot RAG support."""
+
+            capture_features: bool = False   # set True (eval2024 --dump-features) to harvest gate signals
+            last_features: dict | None = None  # features of the most recent _generate()
 
             def _generate(self, msgs: list[dict], temperature: float = 0.0) -> str:
                 prompt = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
@@ -477,6 +534,7 @@ def run_hf_baseline(
                 # pass the prompt via text= so it isn't mis-routed to the image decoder.
                 inp = tokenizer(text=prompt, return_tensors="pt").to(model.device)
                 do_sample = temperature > 0.0
+                cap = self.capture_features
                 with torch.no_grad():
                     out = model.generate(
                         **inp,
@@ -484,8 +542,20 @@ def run_hf_baseline(
                         do_sample=do_sample,
                         temperature=temperature if do_sample else None,
                         pad_token_id=tokenizer.eos_token_id,
+                        output_scores=cap,
+                        return_dict_in_generate=cap,
                     )
-                raw = tokenizer.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                input_len = inp["input_ids"].shape[1]
+                if cap:
+                    gen_ids = out.sequences[0][input_len:]
+                    try:  # never let feature capture break the eval
+                        self.last_features = _confidence_features(out.scores, gen_ids, _kw_ids)
+                    except Exception:
+                        self.last_features = None
+                    raw = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+                else:
+                    self.last_features = None
+                    raw = tokenizer.decode(out[0][input_len:], skip_special_tokens=True).strip()
                 return _extract_sql(raw)
 
             def _user_content(self, question: str) -> str:

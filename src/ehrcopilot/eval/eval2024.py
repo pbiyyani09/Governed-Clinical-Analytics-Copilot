@@ -81,6 +81,13 @@ def main() -> None:
     p.add_argument("--db", default=str(config.SQLITE_DB_PATH))
     p.add_argument("--output", default=None, help="metrics JSON path")
     p.add_argument("--pred-output", default=None, help="prediction.json path (Codabench format)")
+    p.add_argument(
+        "--dump-features", action="store_true",
+        help="Harvest per-prediction confidence features (max-entropy, bottom-k log-prob, "
+             "was_repaired, is_empty) for offline conformal calibration of the confidence gate. "
+             "Run this on Colab (GPU) for valid AND test; calibrate locally (CPU).",
+    )
+    p.add_argument("--features-output", default=None, help="features JSON path (id -> feature dict)")
     p.add_argument("--limit", type=int, default=0, help="debug: cap #examples")
     args = p.parse_args()
 
@@ -103,30 +110,46 @@ def main() -> None:
     print(f"Repair loop: {'enabled' if has_repair else 'off'}")
 
     pred_dict: dict[str, str] = {}
+    features: dict[str, dict] | None = {} if args.dump_features else None
+    if args.dump_features:
+        try:
+            model_fn.capture_features = True  # harness _UnslothPredictor flag
+        except Exception:
+            print("  (features requested but model_fn doesn't support capture — HF path?)")
     t0 = time.time()
     for i, e in enumerate(examples):
-        raw = model_fn(e.question)
-        pred = _to_pred(_extract_sql(raw) if raw else "")
+        pred = _to_pred(model_fn(e.question) or "")
+        feat = dict(getattr(model_fn, "last_features", None) or {})
+        was_repaired = 0
         if has_repair and pred != "null":
             for _ in range(config.MAX_REPAIR_ATTEMPTS):
                 err = _exec_error(pred, args.db)
                 if not err:
                     break
-                rpred = _to_pred(_extract_sql(model_fn.repair(e.question, pred, err) or ""))
+                rpred = _to_pred(model_fn.repair(e.question, pred, err) or "")
+                was_repaired = 1
                 if rpred == "null":
                     pred = "null"
                     break
                 pred = rpred
+            f2 = getattr(model_fn, "last_features", None)  # features of the FINAL decode
+            if f2:
+                feat = dict(f2)
         # Execution-based abstention gate — the highest-ROI RS(10) lever (LG/KAIST: +155 on dev).
         # After repair, abstain on SQL that still errors (and optionally returns empty) instead of
         # submitting a broken query and eating the -10 penalty.
-        if pred != "null" and args.exec_gate != "off":
+        is_empty = 0
+        if pred != "null":
             ok, nonempty = _exec_status(pred, args.db)
+            is_empty = 1 if (ok and not nonempty) else 0
             if (not ok and args.exec_gate in ("error", "both")) or (
                 ok and not nonempty and args.exec_gate in ("empty", "both")
             ):
                 pred = "null"
         pred_dict[e.id] = pred
+        if features is not None:
+            feat.update({"was_repaired": was_repaired, "is_empty": is_empty})
+            features[e.id] = feat
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(examples)}  ({(time.time()-t0)/(i+1):.2f}s/ex)", flush=True)
 
@@ -144,6 +167,13 @@ def main() -> None:
         Path(pred_out).parent.mkdir(parents=True, exist_ok=True)
         json.dump(pred_dict, open(pred_out, "w"))
         print(f"predictions -> {pred_out}")
+    if features is not None:
+        feat_out = args.features_output or (
+            str(Path(args.output).with_suffix(".features.json")) if args.output else "features.json"
+        )
+        Path(feat_out).parent.mkdir(parents=True, exist_ok=True)
+        json.dump(features, open(feat_out, "w"))
+        print(f"features -> {feat_out}")
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         json.dump(metrics, open(args.output, "w"), indent=2)

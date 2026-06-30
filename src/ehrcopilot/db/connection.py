@@ -35,10 +35,8 @@ def _set_timeout_pragma(conn: sqlite3.Connection, timeout_seconds: int) -> None:
     def _progress() -> bool:
         call_count[0] += 1
         if call_count[0] > max_calls:
-            raise QueryTimeoutError(
-                f"Query exceeded {timeout_seconds}s wall-clock limit"
-            )
-        return False  # returning True would abort the query via sqlite3 mechanism
+            return True  # non-False return aborts the query; SQLite raises OperationalError("interrupted")
+        return False
 
     conn.set_progress_handler(_progress, 1000)
 
@@ -113,8 +111,15 @@ def execute_query(
     resolved_max_rows = max_rows if max_rows is not None else config.MAX_ROWS
 
     with get_connection(db_path, timeout_seconds, resolved_max_rows) as conn:
-        cursor = conn.execute(sql)
-        rows = cursor.fetchmany(resolved_max_rows + 1)
+        try:
+            cursor = conn.execute(sql)
+            rows = cursor.fetchmany(resolved_max_rows + 1)
+        except sqlite3.OperationalError as exc:
+            if "interrupted" in str(exc).lower():
+                raise QueryTimeoutError(
+                    f"Query exceeded the wall-clock limit"
+                ) from exc
+            raise
 
         if len(rows) > resolved_max_rows:
             raise RowCapExceededError(

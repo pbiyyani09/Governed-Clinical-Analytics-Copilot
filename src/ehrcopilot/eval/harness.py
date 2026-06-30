@@ -180,7 +180,6 @@ class EvalMetrics:
     empty_abstentions: int = 0     # predictions converted to [ABSTAIN] by empty-result gate
 
     # Latency
-    total_latency_ms: float = 0.0
     latency_samples: list[float] = field(default_factory=list)
 
     @property
@@ -479,7 +478,17 @@ def build_few_shot_retriever(
                 f"Run: python -m ehrcopilot.eval.rag_eval --mode template first."
             )
 
-        clf_data = joblib.load(str(classifier_cache))
+        # Resolve to absolute path and confirm it stays within the project data directory.
+        # joblib uses pickle internally — loading an attacker-controlled path is RCE.
+        resolved_clf = classifier_cache.resolve()
+        project_data = (config.DATA_DIR).resolve()
+        if not str(resolved_clf).startswith(str(project_data)):
+            raise ValueError(
+                f"--classifier-cache path {resolved_clf} is outside the project data "
+                f"directory ({project_data}). Refusing to load."
+            )
+
+        clf_data = joblib.load(str(resolved_clf))
         clf = clf_data["clf"]
         clf_tags = clf_data["tag_list"]
         print(f"Template classifier loaded ({len(clf_tags)} base templates)")
@@ -677,8 +686,9 @@ def run_hf_baseline(
                 if abstain_count >= math.ceil(num_samples / 2):
                     return ABSTAIN_TOKEN
 
-                # Execute non-abstain predictions and vote on result sets
-                result_counts: list[tuple[frozenset, str]] = []
+                # Execute non-abstain predictions and vote on result sets.
+                # dict maps result-set key → (count, first_sql_that_produced_it)
+                result_counts: dict[str, tuple[int, str]] = {}
                 for pred in preds:
                     if pred == ABSTAIN_TOKEN or not pred:
                         continue
@@ -686,13 +696,11 @@ def run_hf_baseline(
                     if err is not None:
                         continue
                     key = _normalize_result(rows)
-                    # Find if this result set was seen before
-                    for i, (existing_key, _) in enumerate(result_counts):
-                        if existing_key == key:
-                            result_counts[i] = (key, result_counts[i][1])
-                            break
+                    if key in result_counts:
+                        cnt, first_sql = result_counts[key]
+                        result_counts[key] = (cnt + 1, first_sql)
                     else:
-                        result_counts.append((key, pred))
+                        result_counts[key] = (1, pred)
 
                 if not result_counts:
                     # All non-abstain predictions failed execution — fall back to first non-abstain
@@ -702,11 +710,8 @@ def run_hf_baseline(
                     return ABSTAIN_TOKEN
 
                 # Return SQL from the most common result set (stable: first occurrence wins ties)
-                best_key = max(
-                    (k for k, _ in result_counts),
-                    key=lambda k: sum(1 for rk, _ in result_counts if rk == k),
-                )
-                return next(sql for k, sql in result_counts if k == best_key)
+                best_key = max(result_counts, key=lambda k: result_counts[k][0])
+                return result_counts[best_key][1]
 
         return _UnslothPredictor()
 
@@ -776,15 +781,13 @@ def evaluate(
         attempts) are treated as [ABSTAIN] instead of counting as wrong SQL. This converts
         score -N to 0 in official RS(N), which is the biggest RS lever after model quality.
     """
-    import sys
-
     repair_fn = getattr(model_fn, "repair", None) if max_repair_attempts > 0 else None
     vote_fn = getattr(model_fn, "vote", None) if num_samples > 1 else None
 
     metrics = EvalMetrics()
     example_list = list(examples)
     total = len(example_list)
-    _pred_fh = open(predictions_path, "w") if predictions_path else None
+    _pred_fh = open(predictions_path, "w") if predictions_path else None  # noqa: SIM115  # closed at end
 
     for ex in example_list:
         metrics.total += 1
@@ -820,6 +823,15 @@ def evaluate(
                 metrics.wrong_abstentions += 1
                 if verbose:
                     print(f"[WRONG_ABSTAIN] {ex.id}: {ex.question[:60]}")
+                if _pred_fh:
+                    _pred_fh.write(json.dumps({
+                        "id": ex.id, "question": ex.question,
+                        "gold_sql": ex.gold_sql, "gold_err": None,
+                        "gold_status": "unknown",
+                        "predicted_sql": None, "pred_err": None,
+                        "outcome": "WRONG_ABSTAIN", "latency_ms": round(latency_ms, 1),
+                        "entropy": round(entropy, 4),
+                    }) + "\n")
             else:
                 gold_rows, gold_err = _exec_safe(post_process_sql(ex.gold_sql))
 

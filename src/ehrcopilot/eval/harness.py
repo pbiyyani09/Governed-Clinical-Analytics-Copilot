@@ -1,17 +1,22 @@
 """Evaluation harness: Execution Accuracy (EX) and Reliability Score RS(N).
 
-Metrics mirror the EHRSQL 2024 shared task evaluation protocol.
+Metrics mirror the EHRSQL 2024 shared task official scoring program
+(github.com/glee4810/ehrsql-2024/blob/master/scoring_program/scoring.py).
 
 EX  — fraction of answerable questions where the predicted SQL produces the same
       execution result as the gold SQL.
 
-RS(N) — reliability score with penalty N for wrong answers on unanswerable questions:
-         RS(N) = (#correct_answers + #correct_abstentions
-                  - N * #wrong_answers_on_unanswerable) / total_questions
-         Wrong abstentions (abstaining on answerable questions) score 0, not −N.
-         Reference: Lee et al., EHRSQL NeurIPS 2022 and EHRSQL 2024 shared task.
-
-Reference: Lee et al., EHRSQL: A Practical Text-to-SQL Benchmark for EHRs, NeurIPS 2022.
+RS(N) — official EHRSQL 2024 reliability score (scoring_utils.py::penalize):
+         Each question gets a base score:
+           +1  answerable  + correct SQL result
+            0  answerable  + abstained  (wrong abstention)
+           -1  answerable  + wrong SQL  (execution error OR wrong result)
+           -1  unanswerable + any SQL   (hallucinated)
+           +1  unanswerable + abstained (correct abstention)
+         RS(N) = mean(score × N  if score == −1  else score)
+               = (#correct_answers + #correct_abstentions
+                  - N × (#wrong_SQL_answerable + #wrong_on_unanswerable)) / total
+         Wrong SQL on ANSWERABLE questions is also penalised at rate N.
 """
 
 from __future__ import annotations
@@ -30,14 +35,43 @@ from ehrcopilot.db.connection import execute_query
 ABSTAIN_TOKEN = "[ABSTAIN]"
 
 
-def _canonicalize_gold_sql(sql: str) -> str:
-    """No-op: EHRSQL 2024 gold SQL already uses the correct MIMIC-IV column names.
+_CURRENT_TIME = "2100-12-31 23:59:00"  # EHRSQL 2024 synthetic "now" (all MIMIC dates are year 2100)
+_CURRENT_DATE = "2100-12-31"
+_TIME_PATTERN = re.compile(
+    r"(DATE_SUB|DATE_ADD)\((\w+\(\)|'[^']+')[, ]+INTERVAL (\d+) (MONTH|YEAR|DAY)\)",
+    re.IGNORECASE,
+)
 
-    The EHRSQL 2024 benchmark ships its own SQLite DB (mimic_iv.sqlite) that uses
-    MIMIC-IV naming (stay_id, icd_code, starttime, careunit, admissions.age,
-    diagnoses_icd.charttime) and includes all required tables (cost, inputevents,
-    outputevents). No schema remaps are needed.
+
+def _date_fn_to_sqlite(m: re.Match) -> str:
+    """Convert MySQL DATE_SUB/DATE_ADD to SQLite datetime() modifier."""
+    fn, date, n, unit = m.group(1).upper(), m.group(2), m.group(3), m.group(4).lower()
+    unit = unit.rstrip("s") if n == "1" else (unit if unit.endswith("s") else unit + "s")
+    sign = "-" if fn == "DATE_SUB" else "+"
+    return f"datetime({date}, '{sign}{n} {unit}')"
+
+
+def post_process_sql(sql: str) -> str:
+    """Mirror the official EHRSQL 2024 scoring_program/postprocessing.py.
+
+    Applied to BOTH gold and predicted SQL before execution so that queries using
+    the 'current_time' placeholder (286/934 test queries) and strftime '%y'/'%j'
+    patterns (363/934) produce the same results as the official scorer.
+
+    Without this, our harness executes with the actual system date (2026) against
+    synthetic MIMIC data whose dates are all in year 2100, causing 177/934 gold
+    queries to return wrong reference results (82 empty instead of data).
     """
+    sql = re.sub(r"[ ]+", " ", sql.replace("\n", " ")).strip()
+    sql = sql.replace("> =", ">=").replace("< =", "<=").replace("! =", "!=")
+    sql = _TIME_PATTERN.sub(_date_fn_to_sqlite, sql)
+    if "current_time" in sql:
+        sql = sql.replace("current_time", f"'{_CURRENT_TIME}'")
+    if "current_date" in sql:
+        sql = sql.replace("current_date", f"'{_CURRENT_DATE}'")
+    if "'now'" in sql:
+        sql = sql.replace("'now'", f"'{_CURRENT_TIME}'")
+    sql = sql.replace("%y", "%Y").replace("%j", "%J")
     return sql
 
 
@@ -133,10 +167,24 @@ class EvalMetrics:
         # correct_answers includes matches on empty gold — bound it to valid gold count
         return min(self.correct_answers, self.gold_exec_valid) / self.gold_exec_valid
 
+    @property
+    def wrong_sql_answerable(self) -> int:
+        """Answerable questions where model gave SQL but result was wrong or errored."""
+        return self.answerable - self.correct_answers - self.wrong_abstentions
+
     def rs(self, n: int) -> float:
+        """Official EHRSQL 2024 RS(N): penalises wrong SQL on ALL questions at rate N.
+
+        Mirrors scoring_utils.py::penalize(scores, penalty=n) where score=-1 for
+        BOTH wrong answers on answerable questions AND any SQL on unanswerable questions.
+        """
         if self.total == 0:
             return 0.0
-        return (self.correct_answers + self.correct_abstentions - n * self.wrong_answers) / self.total
+        return (
+            self.correct_answers + self.correct_abstentions
+            - n * self.wrong_sql_answerable
+            - n * self.wrong_answers
+        ) / self.total
 
     @property
     def p50_latency_ms(self) -> float:
@@ -164,6 +212,7 @@ class EvalMetrics:
             "RS(10)": round(self.rs(10), 4),
             "correct_answers": self.correct_answers,
             "wrong_abstentions": self.wrong_abstentions,
+            "wrong_sql_answerable": self.wrong_sql_answerable,
             "wrong_answers_on_unanswerable": self.wrong_answers,
             "correct_abstentions": self.correct_abstentions,
             "gold_exec_valid": self.gold_exec_valid,
@@ -190,16 +239,26 @@ class EvalMetrics:
 # ---------------------------------------------------------------------------
 
 
-def _normalize_result(rows: list[dict[str, Any]] | None) -> frozenset[tuple[Any, ...]]:
-    """Order-independent comparison of SQL result sets.
+def _normalize_item(v: Any) -> str:
+    """Match official process_item: round floats to 3dp, then stringify."""
+    try:
+        return str(round(float(v), 3))
+    except (TypeError, ValueError):
+        return str(v)
 
-    Column names are lowercased so that identical SQL written in different cases
-    (e.g. gold 'SELECT COUNT(*)>0' vs model 'select count(*)>0') produces matching
-    result sets regardless of the alias casing SQLite returns.
+
+def _normalize_result(rows: list[dict[str, Any]] | None) -> str:
+    """Order-independent result-set comparison matching the official EHRSQL 2024 scorer.
+
+    Mirrors scoring_utils.py::process_answer:
+    - Values only (column names ignored — avoids alias mismatches like COUNT(*) vs count(*))
+    - Floats rounded to 3 decimal places (avoids floating-point equality failures)
+    - Sorted rows (order-independent)
+    - First 100 rows only (matches official 100-row cap)
     """
     if not rows:
-        return frozenset()
-    return frozenset(tuple(sorted((k.lower(), v) for k, v in row.items())) for row in rows)
+        return "[]"
+    return str(sorted([[_normalize_item(v) for v in row.values()] for row in rows])[:100])
 
 
 def _exec_safe(sql: str) -> tuple[list[dict[str, Any]] | None, str | None]:
@@ -219,9 +278,8 @@ def results_match(
 ) -> bool:
     """Return True only when gold executed successfully AND result sets are identical.
 
-    Without the gold_err guard, any two SQL errors both produce frozenset() == frozenset()
-    and count as "correct" — inflating EX by ~56% on MIMIC-IV-Demo (48.5% of gold SQL
-    errors on our DB; any model error on those questions counts as a match).
+    Gold error guard: without it, any two SQL errors produce "[]" == "[]" and count
+    as "correct" — this guard prevents false positives on schema-error questions.
     """
     if gold_err is not None:
         return False
@@ -667,6 +725,7 @@ def evaluate(
     predictions_path: "Path | None" = None,
     entropy_threshold: "float | None" = None,
     abstain_on_empty: bool = False,
+    abstain_on_error: bool = False,
 ) -> EvalMetrics:
     """Run model_fn over examples, execute results, compute EX and RS(N).
 
@@ -677,6 +736,9 @@ def evaluate(
         converted to [ABSTAIN] before the repair loop (mirrors PLUQ winner's entropy filter).
     abstain_on_empty: if True, predictions that execute but return no rows are treated as
         [ABSTAIN] (mirrors PLUQ winner's execution filter).
+    abstain_on_error: if True, predictions that fail SQL execution (after all repair
+        attempts) are treated as [ABSTAIN] instead of counting as wrong SQL. This converts
+        score -N to 0 in official RS(N), which is the biggest RS lever after model quality.
     """
     import sys
 
@@ -723,7 +785,7 @@ def evaluate(
                 if verbose:
                     print(f"[WRONG_ABSTAIN] {ex.id}: {ex.question[:60]}")
             else:
-                gold_rows, gold_err = _exec_safe(_canonicalize_gold_sql(ex.gold_sql))
+                gold_rows, gold_err = _exec_safe(post_process_sql(ex.gold_sql))
 
                 # Track gold SQL validity — critical for understanding true EX signal.
                 # On MIMIC-IV-Demo, 48.5% of gold SQL errors (missing tables/columns from
@@ -736,7 +798,7 @@ def evaluate(
                 else:
                     metrics.gold_exec_empty += 1
 
-                pred_rows, pred_err = _exec_safe(predicted_sql)
+                pred_rows, pred_err = _exec_safe(post_process_sql(predicted_sql))
 
                 # Execution filter: empty result → abstain (mirrors PLUQ winner)
                 if abstain_on_empty and not pred_rows and pred_err is None:
@@ -774,6 +836,26 @@ def evaluate(
                                 print(f"  [REPAIRED attempt {_attempt+1}] {ex.id}")
                             break
                         predicted_sql = repaired
+
+                # Execution error filter: abstain if SQL still fails after all repairs.
+                # Converts score -N to 0 in official RS(N), saving N pts per failed query.
+                if abstain_on_error and pred_err is not None:
+                    predicted_sql = ABSTAIN_TOKEN
+                    abstained = True
+                    metrics.wrong_abstentions += 1
+                    outcome = "WRONG_ABSTAIN_ERROR"
+                    if verbose:
+                        print(f"[WRONG_ABSTAIN_ERROR] {ex.id}: {pred_err[:60]}")
+                    if _pred_fh:
+                        _pred_fh.write(json.dumps({
+                            "id": ex.id, "question": ex.question,
+                            "gold_sql": ex.gold_sql, "gold_err": gold_err,
+                            "gold_status": "error" if gold_err else ("valid" if gold_rows else "empty"),
+                            "predicted_sql": None, "pred_err": pred_err,
+                            "outcome": outcome, "latency_ms": round(latency_ms, 1),
+                            "entropy": round(entropy, 4),
+                        }) + "\n")
+                    continue
 
                 # Pass gold_err so results_match never counts error==error as correct.
                 is_correct = pred_err is None and results_match(pred_rows, gold_rows, gold_err=gold_err)
@@ -920,6 +1002,14 @@ def main() -> None:
             "may slightly increase wrong_abstentions on answerable questions."
         ),
     )
+    parser.add_argument(
+        "--abstain-on-error", action="store_true",
+        help=(
+            "Treat predictions that fail SQL execution (after all repair attempts) as [ABSTAIN] "
+            "instead of counting as wrong SQL. In official RS(N), this converts score -N to 0. "
+            "Crucial for RS(10): each error avoided saves 10 points."
+        ),
+    )
     args = parser.parse_args()
 
     split_path = Path(args.split)
@@ -965,6 +1055,8 @@ def main() -> None:
         print(f"Entropy filtering: threshold={args.entropy_threshold:.4f} (predictions above this → [ABSTAIN])")
     if args.abstain_on_empty:
         print("Execution filtering: empty SQL result → [ABSTAIN]")
+    if args.abstain_on_error:
+        print("Execution filtering: SQL error (after repairs) → [ABSTAIN]")
 
     print("Running evaluation...")
     metrics = evaluate(
@@ -975,6 +1067,7 @@ def main() -> None:
         predictions_path=pred_path,
         entropy_threshold=args.entropy_threshold,
         abstain_on_empty=args.abstain_on_empty,
+        abstain_on_error=args.abstain_on_error,
     )
 
     summary = metrics.summary()

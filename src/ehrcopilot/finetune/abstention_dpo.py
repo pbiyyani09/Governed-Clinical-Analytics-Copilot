@@ -44,6 +44,10 @@ def main() -> None:
                         help="Max tokens for prompt+chosen/rejected (default 1536; use 1024 to speed up)")
     parser.add_argument("--orpo-lambda", type=float, default=0.1,
                         help="ORPO lambda: weight of odds-ratio loss vs SFT loss")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Per-device train batch size (default 1; A100 can use 4)")
+    parser.add_argument("--grad-accum", type=int, default=16,
+                        help="Gradient accumulation steps (default 16; adjust for effective batch 16)")
     parser.add_argument("--resume-from-checkpoint", default=None,
                         help="Checkpoint dir to resume from (or 'true' for latest)")
     args = parser.parse_args()
@@ -66,7 +70,7 @@ def main() -> None:
     print(f"Loading SFT adapter from {args.adapter}")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.adapter,
-        max_seq_length=1536,
+        max_seq_length=args.max_length,
         dtype=torch.bfloat16,
         load_in_4bit=True,
     )
@@ -88,8 +92,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     orpo_config = ORPOConfig(
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
         max_length=args.max_length,
         max_prompt_length=min(896, args.max_length - 200),
         beta=args.orpo_lambda,   # TRL's ORPOConfig uses 'beta' as the lambda parameter name

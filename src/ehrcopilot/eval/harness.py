@@ -37,10 +37,25 @@ ABSTAIN_TOKEN = "[ABSTAIN]"
 
 _CURRENT_TIME = "2100-12-31 23:59:00"  # EHRSQL 2024 synthetic "now" (all MIMIC dates are year 2100)
 _CURRENT_DATE = "2100-12-31"
+_CURRENT_TIME_ONLY = "23:59:00"
 _TIME_PATTERN = re.compile(
     r"(DATE_SUB|DATE_ADD)\((\w+\(\)|'[^']+')[, ]+INTERVAL (\d+) (MONTH|YEAR|DAY)\)",
     re.IGNORECASE,
 )
+# Official EHRSQL 2024 vital-sign normal ranges (from scoring_program/postprocessing.py).
+# Gold SQL references abstract column names like `temperature_lower` / `temperature_upper`
+# that don't exist in the SQLite DB — the scorer substitutes these before execution.
+_VITAL_RANGES: dict[str, tuple[float, float]] = {
+    "temperature": (35.5, 38.1),
+    "sao2": (95.0, 100.0),
+    "heart rate": (60.0, 100.0),
+    "respiration": (12.0, 18.0),
+    "systolic bp": (90.0, 120.0),
+    "diastolic bp": (60.0, 90.0),
+    "mean bp": (60.0, 110.0),
+}
+_VITAL_LOWER_RE = re.compile(r"[ \n]+([a-zA-Z0-9_]+_lower)")
+_VITAL_UPPER_RE = re.compile(r"[ \n]+([a-zA-Z0-9_]+_upper)")
 
 
 def _date_fn_to_sqlite(m: re.Match) -> str:
@@ -52,7 +67,7 @@ def _date_fn_to_sqlite(m: re.Match) -> str:
 
 
 def post_process_sql(sql: str) -> str:
-    """Mirror the official EHRSQL 2024 scoring_program/postprocessing.py.
+    """Mirror the official EHRSQL 2024 scoring_program/postprocessing.py exactly.
 
     Applied to BOTH gold and predicted SQL before execution so that queries using
     the 'current_time' placeholder (286/934 test queries) and strftime '%y'/'%j'
@@ -71,6 +86,27 @@ def post_process_sql(sql: str) -> str:
         sql = sql.replace("current_date", f"'{_CURRENT_DATE}'")
     if "'now'" in sql:
         sql = sql.replace("'now'", f"'{_CURRENT_TIME}'")
+    if "NOW()" in sql:
+        sql = sql.replace("NOW()", f"'{_CURRENT_TIME}'")
+    if "CURDATE()" in sql:
+        sql = sql.replace("CURDATE()", f"'{_CURRENT_DATE}'")
+    if "CURTIME()" in sql:
+        sql = sql.replace("CURTIME()", f"'{_CURRENT_TIME_ONLY}'")
+    # Vital sign range substitution: `temperature_lower` → 35.5, etc.
+    lower_m = _VITAL_LOWER_RE.search(sql)
+    upper_m = _VITAL_UPPER_RE.search(sql)
+    if lower_m and upper_m:
+        lower_expr = lower_m.group(1)
+        upper_expr = upper_m.group(1)
+        vital_names = list(set(
+            re.findall(r"([a-zA-Z0-9_]+)_lower", lower_expr) +
+            re.findall(r"([a-zA-Z0-9_]+)_upper", upper_expr)
+        ))
+        if len(vital_names) == 1:
+            vital_key = vital_names[0].replace("_", " ")
+            if vital_key in _VITAL_RANGES:
+                lo, hi = _VITAL_RANGES[vital_key]
+                sql = sql.replace(lower_expr, str(lo)).replace(upper_expr, str(hi))
     sql = sql.replace("%y", "%Y").replace("%j", "%J")
     return sql
 

@@ -104,6 +104,11 @@ class EvalMetrics:
     repair_attempts: int = 0
     repair_successes: int = 0
 
+    # Entropy filtering stats (non-empty only when --entropy-threshold is set)
+    entropy_samples: list[float] = field(default_factory=list)
+    entropy_abstentions: int = 0   # predictions converted to [ABSTAIN] by entropy gate
+    empty_abstentions: int = 0     # predictions converted to [ABSTAIN] by empty-result gate
+
     # Latency
     total_latency_ms: float = 0.0
     latency_samples: list[float] = field(default_factory=list)
@@ -170,6 +175,13 @@ class EvalMetrics:
         if self.repair_attempts > 0:
             d["repair_attempts"] = self.repair_attempts
             d["repair_successes"] = self.repair_successes
+        if self.entropy_samples:
+            sorted_ent = sorted(self.entropy_samples)
+            d["entropy_p50"] = round(sorted_ent[len(sorted_ent) // 2], 4)
+            d["entropy_p95"] = round(sorted_ent[int(len(sorted_ent) * 0.95)], 4)
+            d["entropy_abstentions"] = self.entropy_abstentions
+        if self.empty_abstentions:
+            d["empty_abstentions"] = self.empty_abstentions
         return d
 
 
@@ -483,10 +495,27 @@ def run_hf_baseline(
         class _UnslothPredictor:
             """Callable model function with repair and optional few-shot RAG support."""
 
-            def _generate(self, msgs: list[dict], temperature: float = 0.0) -> str:
+            def _generate_with_entropy(self, msgs: list[dict], temperature: float = 0.0) -> tuple[str, float]:
+                from transformers import LogitsProcessor
+
+                class _EntropyCapture(LogitsProcessor):
+                    """Intercept logits at each generation step to compute max token entropy.
+                    Uses LogitsProcessor because Unsloth's patched generate() drops output_scores.
+                    """
+                    def __init__(self) -> None:
+                        self.max_entropy: float = 0.0
+
+                    def __call__(self, input_ids: "torch.LongTensor", scores: "torch.FloatTensor") -> "torch.FloatTensor":
+                        probs = torch.softmax(scores, dim=-1)
+                        ent = -(probs * (probs + 1e-10).log()).sum(dim=-1).max().item()
+                        if ent > self.max_entropy:
+                            self.max_entropy = ent
+                        return scores
+
                 prompt = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
                 inp = tokenizer(prompt, return_tensors="pt").to(model.device)
                 do_sample = temperature > 0.0
+                capture = _EntropyCapture()
                 with torch.no_grad():
                     out = model.generate(
                         **inp,
@@ -494,8 +523,13 @@ def run_hf_baseline(
                         do_sample=do_sample,
                         temperature=temperature if do_sample else None,
                         pad_token_id=tokenizer.eos_token_id,
+                        logits_processor=[capture],
                     )
-                return tokenizer.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                text = tokenizer.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                return text, capture.max_entropy
+
+            def _generate(self, msgs: list[dict], temperature: float = 0.0) -> str:
+                return self._generate_with_entropy(msgs, temperature)[0]
 
             def _user_content(self, question: str) -> str:
                 if few_shot_retriever is None:
@@ -505,6 +539,12 @@ def run_hf_baseline(
 
             def __call__(self, question: str) -> str:
                 return self._generate([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": self._user_content(question)},
+                ])
+
+            def predict_with_entropy(self, question: str) -> tuple[str, float]:
+                return self._generate_with_entropy([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": self._user_content(question)},
                 ])
@@ -625,12 +665,18 @@ def evaluate(
     max_repair_attempts: int = 0,
     num_samples: int = 1,
     predictions_path: "Path | None" = None,
+    entropy_threshold: "float | None" = None,
+    abstain_on_empty: bool = False,
 ) -> EvalMetrics:
     """Run model_fn over examples, execute results, compute EX and RS(N).
 
     max_repair_attempts > 0: retry failed SQL up to N times (requires model_fn.repair()).
     num_samples > 1: self-consistency voting over K samples (requires model_fn.vote()).
     predictions_path: if set, write per-prediction JSONL to this file for debugging.
+    entropy_threshold: if set, predictions with max token entropy above this value are
+        converted to [ABSTAIN] before the repair loop (mirrors PLUQ winner's entropy filter).
+    abstain_on_empty: if True, predictions that execute but return no rows are treated as
+        [ABSTAIN] (mirrors PLUQ winner's execution filter).
     """
     import sys
 
@@ -650,12 +696,24 @@ def evaluate(
             metrics.unanswerable += 1
 
         t0 = time.monotonic()
+        entropy = 0.0
+        _capture_entropy = (entropy_threshold is not None or predictions_path is not None) \
+                           and hasattr(model_fn, "predict_with_entropy")
         if vote_fn is not None:
             predicted_sql = vote_fn(ex.question, num_samples).strip()
+        elif _capture_entropy:
+            predicted_sql, entropy = model_fn.predict_with_entropy(ex.question)
+            predicted_sql = predicted_sql.strip()
+            metrics.entropy_samples.append(entropy)
         else:
             predicted_sql = model_fn(ex.question).strip()
         latency_ms = (time.monotonic() - t0) * 1000
         metrics.latency_samples.append(latency_ms)
+
+        # Entropy gate: uncertain prediction → abstain (before repair)
+        if entropy_threshold is not None and entropy > entropy_threshold:
+            predicted_sql = ABSTAIN_TOKEN
+            metrics.entropy_abstentions += 1
 
         abstained = predicted_sql == ABSTAIN_TOKEN or not predicted_sql
 
@@ -679,6 +737,28 @@ def evaluate(
                     metrics.gold_exec_empty += 1
 
                 pred_rows, pred_err = _exec_safe(predicted_sql)
+
+                # Execution filter: empty result → abstain (mirrors PLUQ winner)
+                if abstain_on_empty and not pred_rows and pred_err is None:
+                    predicted_sql = ABSTAIN_TOKEN
+                    abstained = True
+                    metrics.empty_abstentions += 1
+
+                if abstained:
+                    metrics.wrong_abstentions += 1
+                    outcome = "WRONG_ABSTAIN_EMPTY"
+                    if verbose:
+                        print(f"[WRONG_ABSTAIN_EMPTY] {ex.id}: SQL executed empty → abstained")
+                    if _pred_fh:
+                        _pred_fh.write(json.dumps({
+                            "id": ex.id, "question": ex.question,
+                            "gold_sql": ex.gold_sql, "gold_err": None,
+                            "gold_status": "unknown",
+                            "predicted_sql": None, "pred_err": None,
+                            "outcome": outcome, "latency_ms": round(latency_ms, 1),
+                            "entropy": round(entropy, 4),
+                        }) + "\n")
+                    continue
 
                 if pred_err is not None and repair_fn is not None:
                     for _attempt in range(max_repair_attempts):
@@ -719,6 +799,7 @@ def evaluate(
                         "pred_err": pred_err,
                         "outcome": outcome,
                         "latency_ms": round(latency_ms, 1),
+                        "entropy": round(entropy, 4),
                     }) + "\n")
         else:
             # Unanswerable question
@@ -744,6 +825,7 @@ def evaluate(
                     "pred_err": None,
                     "outcome": outcome,
                     "latency_ms": round(latency_ms, 1),
+                    "entropy": round(entropy, 4),
                 }) + "\n")
 
         if metrics.total % progress_every == 0:
@@ -820,7 +902,23 @@ def main() -> None:
     )
     parser.add_argument(
         "--save-predictions", default=None, metavar="PRED_JSONL",
-        help="Write per-prediction JSONL (id, question, gold_sql, gold_status, predicted_sql, outcome) for debugging",
+        help="Write per-prediction JSONL (id, question, gold_sql, gold_status, predicted_sql, outcome, entropy) for debugging",
+    )
+    parser.add_argument(
+        "--entropy-threshold", type=float, default=None, metavar="FLOAT",
+        help=(
+            "Max token entropy threshold: predictions with entropy above this are converted to "
+            "[ABSTAIN] before the repair loop. Tune on valid set — winner used top 7%% percentile. "
+            "Use --save-predictions on valid set first to see the entropy distribution."
+        ),
+    )
+    parser.add_argument(
+        "--abstain-on-empty", action="store_true",
+        help=(
+            "Treat predictions that execute successfully but return no rows as [ABSTAIN]. "
+            "Mirrors the PLUQ winner's execution filter. Safe for unanswerable questions; "
+            "may slightly increase wrong_abstentions on answerable questions."
+        ),
     )
     args = parser.parse_args()
 
@@ -863,6 +961,11 @@ def main() -> None:
         pred_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Per-prediction log: {pred_path}")
 
+    if args.entropy_threshold is not None:
+        print(f"Entropy filtering: threshold={args.entropy_threshold:.4f} (predictions above this → [ABSTAIN])")
+    if args.abstain_on_empty:
+        print("Execution filtering: empty SQL result → [ABSTAIN]")
+
     print("Running evaluation...")
     metrics = evaluate(
         examples, model_fn,
@@ -870,6 +973,8 @@ def main() -> None:
         max_repair_attempts=max_repairs,
         num_samples=args.num_samples,
         predictions_path=pred_path,
+        entropy_threshold=args.entropy_threshold,
+        abstain_on_empty=args.abstain_on_empty,
     )
 
     summary = metrics.summary()

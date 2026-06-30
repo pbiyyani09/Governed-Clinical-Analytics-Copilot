@@ -39,6 +39,9 @@ FEW_SHOT_FLAG=""
 NUM_SAMPLES_FLAG=""
 RETRIEVAL_MODE_FLAG=""
 CLASSIFIER_CACHE_FLAG=""
+ENTROPY_FLAG=""
+ABSTAIN_EMPTY_FLAG=""
+SAVE_PREDS_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -50,6 +53,9 @@ while [[ $# -gt 0 ]]; do
         --num-samples) NUM_SAMPLES_FLAG="--num-samples $2"; shift 2 ;;
         --retrieval-mode) RETRIEVAL_MODE_FLAG="--retrieval-mode $2"; shift 2 ;;
         --classifier-cache) CLASSIFIER_CACHE_FLAG="--classifier-cache $2"; shift 2 ;;
+        --entropy-threshold) ENTROPY_FLAG="--entropy-threshold $2"; shift 2 ;;
+        --abstain-on-empty) ABSTAIN_EMPTY_FLAG="--abstain-on-empty"; shift ;;
+        --save-predictions) SAVE_PREDS_FLAG="--save-predictions $2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -73,6 +79,9 @@ python3 -m ehrcopilot.eval.harness \
     $RETRIEVAL_MODE_FLAG \
     $CLASSIFIER_CACHE_FLAG \
     $NUM_SAMPLES_FLAG \
+    $ENTROPY_FLAG \
+    $ABSTAIN_EMPTY_FLAG \
+    $SAVE_PREDS_FLAG \
     2>&1 | tee logs/sft_eval.log
 
 echo ""

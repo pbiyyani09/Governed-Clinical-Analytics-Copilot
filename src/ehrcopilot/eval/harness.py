@@ -208,16 +208,20 @@ class EvalMetrics:
         return self.answerable - self.correct_answers - self.wrong_abstentions
 
     def rs(self, n: int) -> float:
-        """Official EHRSQL 2024 RS(N): penalises wrong SQL on ALL questions at rate N.
+        """Official EHRSQL 2024 RS(N).
 
-        Mirrors scoring_utils.py::penalize(scores, penalty=n) where score=-1 for
-        BOTH wrong answers on answerable questions AND any SQL on unanswerable questions.
+        Score per question:
+          +1  correct answer (SQL result matches gold) or correct abstention
+           0  wrong abstention ([ABSTAIN] on answerable) OR wrong SQL on answerable
+          -1  hallucination on unanswerable (any SQL when gold='null') → ×N
+
+        Only hallucinations on unanswerable questions are penalised at rate N.
+        Wrong SQL on answerable questions is score 0, NOT −1.
         """
         if self.total == 0:
             return 0.0
         return (
             self.correct_answers + self.correct_abstentions
-            - n * self.wrong_sql_answerable
             - n * self.wrong_answers
         ) / self.total
 

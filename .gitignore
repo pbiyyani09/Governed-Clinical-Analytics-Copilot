@@ -258,3 +258,14 @@ htmlcov/
 
 unsloth_compiled_cache/
 data/ehrsql2024/mimic_iv/mimic_iv.sqlite
+
+# --- Claude Code multi-agent harness (local-only, never push) ---
+.claude/
+CLAUDE.md
+MEMORY.md
+*.claude-log.md
+# Secrets — API keys live here and must never be committed
+.env
+.env.*
+.secrets/
+# --- end harness ---

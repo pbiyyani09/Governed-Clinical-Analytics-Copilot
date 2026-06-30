@@ -97,6 +97,7 @@ def build_pairs(
     adapter_path: Path,
     output_path: Path,
     valid_path: Path | None = None,
+    train_aug_path: Path | None = None,
     max_answerable: int = 500,
     unanswerable_only: bool = False,
     verify_execution: bool = False,
@@ -126,6 +127,9 @@ def build_pairs(
         valid_examples = load_ehrsql_split(valid_path)
         unanswerable_examples = [e for e in valid_examples if not e.is_answerable]
         unanswerable_examples += [e for e in train_examples if not e.is_answerable]
+    if train_aug_path and train_aug_path.exists():
+        aug_examples = load_ehrsql_split(train_aug_path)
+        unanswerable_examples += [e for e in aug_examples if not e.is_answerable]
 
     print(f"Gold SQL pool: {len(gold_sql_pool)} SQLs from answerable train examples")
     print(f"Unanswerable examples: {len(unanswerable_examples)}")
@@ -299,8 +303,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train", required=True, help="EHRSQL train.json")
-    parser.add_argument("--valid", default=None, help="EHRSQL valid.json (unanswerable source)")
+    parser.add_argument("--train", required=True, help="EHRSQL train split dir or data.json")
+    parser.add_argument("--valid", default=None, help="EHRSQL valid split dir (unanswerable source)")
+    parser.add_argument("--train-aug", default=None,
+                        help="EHRSQL train_aug split dir — adds its unanswerable examples to the "
+                             "abstention pool (use to balance abstention ratio vs. test set ~20%%)")
     parser.add_argument("--adapter", required=True, help="SFT adapter path")
     parser.add_argument("--output", required=True, help="Output DPO pairs JSONL")
     parser.add_argument("--max-answerable", type=int, default=500)
@@ -323,6 +330,7 @@ if __name__ == "__main__":
         adapter_path=Path(args.adapter),
         output_path=Path(args.output),
         valid_path=Path(args.valid) if args.valid else None,
+        train_aug_path=Path(args.train_aug) if args.train_aug else None,
         max_answerable=args.max_answerable,
         unanswerable_only=args.unanswerable_only,
         inference_rejected=args.inference_rejected,

@@ -1,0 +1,20 @@
+{
+  "relevance": "medium",
+  "corpus": "train+aug",
+  "rerank_model": "cross-encoder/ms-marco-MiniLM-L-12-v2",
+  "retrieve_k": 500,
+  "results": {
+    "hybrid": {
+      "per_k": {
+        "2": {
+          "hit": 0.6884368308351178,
+          "recall": 0.004387487208508948,
+          "precision": 0.6504282655246253,
+          "ndcg": 0.6524876898040816
+        }
+      },
+      "mrr": 0.673982869379015,
+      "n_evaluated": 934
+    }
+  }
+}

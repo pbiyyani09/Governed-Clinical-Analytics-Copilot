@@ -1,0 +1,22 @@
+{
+  "model": "seeklhy/OmniSQL-7B",
+  "few_shot_k": 10,
+  "repair": false,
+  "total": 1167,
+  "answerable": 934,
+  "unanswerable": 233,
+  "EX": 0.6124,
+  "RS(0)": 0.5758,
+  "RS(5)": 0.006,
+  "RS(10)": -0.5638,
+  "correct_answers": 572,
+  "wrong_abstentions": 3,
+  "wrong_sql_answerable": 359,
+  "wrong_answers_on_unanswerable": 133,
+  "correct_abstentions": 100,
+  "gold_exec_valid": 934,
+  "gold_exec_empty": 0,
+  "gold_exec_error": 0,
+  "p50_latency_ms": 3463.8,
+  "p95_latency_ms": 5543.3
+}

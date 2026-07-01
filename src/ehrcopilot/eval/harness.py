@@ -396,6 +396,22 @@ def _sql_skeleton(sql: str) -> str:
 
 _EMBED_MODEL_NAME = "BAAI/bge-large-en-v1.5"
 
+
+def _medium_label(sql: str) -> str:
+    """Coarse structural label for MIMIC-IV template retrieval.
+
+    Groups SQL queries by the tables they touch + operation type flags.
+    Matches the medium_label() function in rag_eval.py.
+    Format: "table1,table2,...::AGG_GROUP_JOIN"
+    """
+    s = sql.lower()
+    tables = sorted(set(re.findall(r'\b(?:from|join)\s+(\w+)', s)))
+    is_agg = int(bool(re.search(r'\b(count|avg|sum|max|min)\b', s)))
+    has_group = int('group by' in s)
+    has_join = int('join' in s)
+    return f"{','.join(tables)}::{is_agg}{has_group}{has_join}"
+
+
 # ---------------------------------------------------------------------------
 # Hybrid few-shot retriever (BM25 + semantic embeddings via RRF)
 # ---------------------------------------------------------------------------
@@ -404,41 +420,55 @@ _EMBED_MODEL_NAME = "BAAI/bge-large-en-v1.5"
 def build_few_shot_retriever(
     train_path: Path,
     top_k: int = 2,
-    mode: str = "bm25",
+    mode: str = "hybrid",
     embed_cache: "Path | None" = None,
     classifier_cache: "Path | None" = None,
+    aug_path: "Path | None" = None,
 ) -> "Callable[[str], str]":
-    """Build a few-shot retriever over train examples.
+    """Build a few-shot retriever over train (+ optional train_aug) examples.
 
     mode:
-      "bm25"     — keyword BM25 only (default, backward-compatible)
+      "bm25"     — keyword BM25 only
       "embed"    — semantic embedding only (BAAI/bge-large-en-v1.5, GPU if available)
-      "hybrid"   — Reciprocal Rank Fusion of BM25 + embedding
-      "template" — LogReg classifier on bge-large embeddings predicts base template
-                   (165 classes) then retrieves top-K within that template group.
-                   Achieves Recall@K = Precision@K ≈ 92.7% (vs 34.6%/22.5% for BM25).
+      "hybrid"   — Reciprocal Rank Fusion of BM25 + embedding [default]
+      "template" — LogReg classifier (medium label = table-set + op-type) predicts
+                   structural class → top-K cosine within class. Falls back to hybrid
+                   when predicted class has no candidates.
 
-    embed_cache: path to save/load precomputed .npy embeddings.
-    classifier_cache: path to the template LogReg classifier (.pkl).
+    aug_path: optional train_aug directory. When provided, aug examples are added to the
+      retrieval corpus. The combined index (~40K) dramatically improves template mode
+      (median class size 5 → 27) and gives hybrid more diverse candidates.
 
-    SQL is included in full — no truncation.
+    embed_cache: path to save/load precomputed .npy embeddings (auto-derived if None).
+    classifier_cache: path to the medium-label LogReg classifier (.pkl).
     """
     import numpy as np
     from rank_bm25 import BM25Okapi  # type: ignore[import]
+    from collections import defaultdict
+
+    base_dir = Path("data/ehrsql2024/mimic_iv")
 
     examples = [e for e in load_ehrsql_split(train_path) if e.is_answerable and e.gold_sql]
+
+    if aug_path is not None:
+        aug_examples = [e for e in load_ehrsql_split(aug_path) if e.is_answerable and e.gold_sql]
+        examples = examples + aug_examples
+        print(f"Retrieval corpus: {len(examples)} examples (train + aug)")
+    else:
+        print(f"Retrieval corpus: {len(examples)} train examples")
+
     gold_sqls = [e.gold_sql for e in examples]
     questions = [e.question for e in examples]
     n = len(examples)
 
-    # Build BM25 index (used for bm25 and hybrid modes)
+    # BM25 index (bm25, hybrid, and template-fallback modes)
     tokenized = [q.lower().split() for q in questions]
     bm25 = BM25Okapi(tokenized)
 
     embed_model = None
     train_embeds = None
     clf = None
-    tag_to_indices = None
+    medium_to_indices: "dict | None" = None
 
     if mode in ("embed", "hybrid", "template"):
         import torch
@@ -447,21 +477,23 @@ def build_few_shot_retriever(
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if embed_cache is None:
-            base = train_path if train_path.is_dir() else train_path.parent
-            embed_cache = base.parent / "train_embeddings_bge_large.npy"
+            suffix = "_combined" if aug_path else ""
+            embed_cache = base_dir / f"train{suffix}_embeddings_bge_large.npy"
 
-        if embed_cache.exists():
+        cached = np.load(str(embed_cache)) if embed_cache.exists() else None
+        if cached is not None and cached.shape[0] == n:
             print(f"Loading cached embeddings from {embed_cache}")
-            train_embeds = np.load(str(embed_cache))
+            train_embeds = cached
         else:
-            print(f"Computing train embeddings with {_EMBED_MODEL_NAME} on {device} ...")
+            if cached is not None:
+                print(f"Cache size mismatch ({cached.shape[0]} vs {n}) — rebuilding")
+            print(f"Computing {n} embeddings with {_EMBED_MODEL_NAME} on {device} ...")
             _tmp = SentenceTransformer(_EMBED_MODEL_NAME, device=device)
-            # embed mode and hybrid: index question+SQL skeleton
-            # template mode: index question only (centroids are question-only)
             index_texts = [q + " " + _sql_skeleton(sql) for q, sql in zip(questions, gold_sqls)]
             train_embeds = _tmp.encode(
                 index_texts, show_progress_bar=True, batch_size=64, normalize_embeddings=True,
             )
+            embed_cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(str(embed_cache), train_embeds)
             print(f"Embeddings saved to {embed_cache}")
 
@@ -470,20 +502,17 @@ def build_few_shot_retriever(
 
     if mode == "template":
         import joblib  # type: ignore[import]
-        from collections import defaultdict
 
         if classifier_cache is None:
-            base = train_path if train_path.is_dir() else train_path.parent
-            classifier_cache = base.parent / "template_classifier.pkl"
+            suffix = "_combined" if aug_path else ""
+            classifier_cache = base_dir / f"template_classifier_medium{suffix}.pkl"
 
         if not classifier_cache.exists():
             raise FileNotFoundError(
                 f"Template classifier not found at {classifier_cache}. "
-                f"Run: python -m ehrcopilot.eval.rag_eval --mode template first."
+                f"Run: python -m ehrcopilot.eval.rag_eval --mode template --relevance medium first."
             )
 
-        # Resolve to absolute path and confirm it stays within the project data directory.
-        # joblib uses pickle internally — loading an attacker-controlled path is RCE.
         resolved_clf = classifier_cache.resolve()
         project_data = (config.DATA_DIR).resolve()
         if not str(resolved_clf).startswith(str(project_data)):
@@ -494,52 +523,56 @@ def build_few_shot_retriever(
 
         clf_data = joblib.load(str(resolved_clf))
         clf = clf_data["clf"]
-        clf_tags = clf_data["tag_list"]
-        print(f"Template classifier loaded ({len(clf_tags)} base templates)")
+        clf_labels = clf_data["skeleton_list"]
+        print(f"Template classifier loaded ({len(clf_labels)} medium-label classes)")
 
-        # Build base_tag → example indices mapping
-        tag_to_indices = defaultdict(list)
-        for i, ex in enumerate(examples):
-            bt = _base_tag(ex.tag)
-            if bt:
-                tag_to_indices[bt].append(i)
+        medium_to_indices = defaultdict(list)
+        for i, sql in enumerate(gold_sqls):
+            lbl = _medium_label(sql)
+            if lbl:
+                medium_to_indices[lbl].append(i)
+
+    def _hybrid_top_k(q_vec: "np.ndarray", bm25_scores: "np.ndarray") -> "list[int]":
+        bm25_order = (-bm25_scores).argsort()
+        bm25_ranks = np.empty(n, dtype=np.float32)
+        bm25_ranks[bm25_order] = np.arange(1, n + 1, dtype=np.float32)
+        cosine = (train_embeds @ q_vec.T).squeeze()
+        embed_order = (-cosine).argsort()
+        embed_ranks = np.empty(n, dtype=np.float32)
+        embed_ranks[embed_order] = np.arange(1, n + 1, dtype=np.float32)
+        rrf = 1.0 / (60 + bm25_ranks) + 1.0 / (60 + embed_ranks)
+        return list(map(int, (-rrf).argsort()[:top_k]))
 
     def _retrieve(question: str) -> str:
         if mode == "template":
-            assert embed_model is not None and clf is not None and train_embeds is not None
+            assert embed_model is not None and clf is not None
+            assert train_embeds is not None and medium_to_indices is not None
             q_vec = embed_model.encode([question], normalize_embeddings=True)
-            predicted_bt = clf_tags[clf.predict(q_vec)[0]]
-            candidates = tag_to_indices.get(predicted_bt, [])
+            predicted_label = clf_labels[clf.predict(q_vec)[0]]
+            candidates = medium_to_indices.get(predicted_label, [])
             if candidates:
                 cand_embeds = train_embeds[candidates]
                 cos = (cand_embeds @ q_vec.T).squeeze()
                 if cos.ndim == 0:
                     cos = cos.reshape(1)
                 best = (-cos).argsort()[:top_k]
-                top_idx = [candidates[i] for i in best]
+                top_idx = [candidates[int(i)] for i in best]
             else:
-                top_idx = []
+                # Hybrid fallback for ~10% of questions whose medium label isn't in corpus
+                bm25_scores = bm25.get_scores(question.lower().split())
+                top_idx = _hybrid_top_k(q_vec, bm25_scores)
         else:
             bm25_scores = bm25.get_scores(question.lower().split())
-
             if mode == "bm25":
                 top_idx = list(map(int, (-bm25_scores).argsort()[:top_k]))
             else:
                 assert embed_model is not None and train_embeds is not None
                 q_vec = embed_model.encode([question], normalize_embeddings=True)
                 cosine = (train_embeds @ q_vec.T).squeeze()
-
                 if mode == "embed":
                     top_idx = list(map(int, (-cosine).argsort()[:top_k]))
                 else:
-                    bm25_order = (-bm25_scores).argsort()
-                    bm25_ranks = np.empty(n, dtype=np.float32)
-                    bm25_ranks[bm25_order] = np.arange(1, n + 1, dtype=np.float32)
-                    embed_order = (-cosine).argsort()
-                    embed_ranks = np.empty(n, dtype=np.float32)
-                    embed_ranks[embed_order] = np.arange(1, n + 1, dtype=np.float32)
-                    rrf = 1.0 / (60 + bm25_ranks) + 1.0 / (60 + embed_ranks)
-                    top_idx = list(map(int, (-rrf).argsort()[:top_k]))
+                    top_idx = _hybrid_top_k(q_vec, bm25_scores)
 
         lines = ["Similar examples:"]
         for idx in top_idx:
@@ -719,8 +752,13 @@ def run_hf_baseline(
 
         return _UnslothPredictor()
 
-    # HF Hub model — use bitsandbytes pipeline
-    from transformers import pipeline, BitsAndBytesConfig  # type: ignore[import]
+    # HF Hub model — load with AutoModelForCausalLM + 4-bit NF4 quantization.
+    # Uses the same interface as _UnslothPredictor: supports few_shot_retriever,
+    # repair(), vote(), and predict_with_entropy().
+    import re as _re
+    from transformers import (  # type: ignore[import]
+        AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, LogitsProcessor,
+    )
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -729,30 +767,127 @@ def run_hf_baseline(
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    pipe = pipeline(
-        "text-generation",
-        model=model_name,
+    hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
         device_map="auto",
-        model_kwargs={"quantization_config": bnb_config},
-        max_new_tokens=256,
-        temperature=None,
-        do_sample=False,
+        torch_dtype=torch.bfloat16,
     )
+    hf_model.eval()
 
-    def _predict(question: str) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ]
-        out = pipe(messages)
-        generated = out[0]["generated_text"]
-        if isinstance(generated, list):
-            for msg in reversed(generated):
-                if msg.get("role") == "assistant":
-                    return msg["content"].strip()
-        return str(generated).strip()
+    def _strip_fences(text: str) -> str:
+        """Extract SQL from markdown code fences if present."""
+        m = _re.search(r'```(?:sql)?\s*(.*?)\s*```', text, _re.DOTALL | _re.IGNORECASE)
+        return m.group(1).strip() if m else text
 
-    return _predict
+    class _HFPredictor:
+        """Full-featured HF Hub model predictor with few-shot, repair, vote, and entropy."""
+
+        def _generate_with_entropy(
+            self, msgs: list[dict], temperature: float = 0.0
+        ) -> tuple[str, float]:
+            class _EntropyCapture(LogitsProcessor):
+                def __init__(self) -> None:
+                    self.max_entropy: float = 0.0
+
+                def __call__(
+                    self, input_ids: "torch.LongTensor", scores: "torch.FloatTensor"
+                ) -> "torch.FloatTensor":
+                    probs = torch.softmax(scores, dim=-1)
+                    ent = -(probs * (probs + 1e-10).log()).sum(dim=-1).max().item()
+                    if ent > self.max_entropy:
+                        self.max_entropy = ent
+                    return scores
+
+            prompt = hf_tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True
+            )
+            inp = hf_tokenizer(prompt, return_tensors="pt").to(hf_model.device)
+            do_sample = temperature > 0.0
+            capture = _EntropyCapture()
+            with torch.no_grad():
+                out = hf_model.generate(
+                    **inp,
+                    max_new_tokens=1024,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    pad_token_id=hf_tokenizer.eos_token_id,
+                    logits_processor=[capture],
+                )
+            text = hf_tokenizer.decode(
+                out[0][inp["input_ids"].shape[1]:], skip_special_tokens=True
+            ).strip()
+            return _strip_fences(text), capture.max_entropy
+
+        def _generate(self, msgs: list[dict], temperature: float = 0.0) -> str:
+            return self._generate_with_entropy(msgs, temperature)[0]
+
+        def _user_content(self, question: str) -> str:
+            if few_shot_retriever is None:
+                return question
+            examples_block = few_shot_retriever(question)
+            return f"{examples_block}\n\nQuestion: {question}"
+
+        def __call__(self, question: str) -> str:
+            return self._generate([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._user_content(question)},
+            ])
+
+        def predict_with_entropy(self, question: str) -> tuple[str, float]:
+            return self._generate_with_entropy([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._user_content(question)},
+            ])
+
+        def repair(self, question: str, failed_sql: str, error: str) -> str:
+            return self._generate([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._user_content(question)},
+                {"role": "assistant", "content": failed_sql},
+                {
+                    "role": "user",
+                    "content": (
+                        f"SQLite error: {error}\n"
+                        "Fix the SQL using only tables and columns in the schema above. "
+                        "Output only the corrected SQL (no explanation)."
+                    ),
+                },
+            ])
+
+        def vote(self, question: str, num_samples: int, temperature: float = 0.7) -> str:
+            import math
+            msgs = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._user_content(question)},
+            ]
+            preds = [self._generate(msgs, temperature=temperature) for _ in range(num_samples)]
+            abstain_count = sum(1 for p in preds if p == ABSTAIN_TOKEN or not p)
+            if abstain_count >= math.ceil(num_samples / 2):
+                return ABSTAIN_TOKEN
+            result_counts: dict[str, tuple[int, str]] = {}
+            for pred in preds:
+                if pred == ABSTAIN_TOKEN or not pred:
+                    continue
+                rows, err = _exec_safe(pred)
+                if err is not None:
+                    continue
+                key = _normalize_result(rows)
+                if key in result_counts:
+                    cnt, first_sql = result_counts[key]
+                    result_counts[key] = (cnt + 1, first_sql)
+                else:
+                    result_counts[key] = (1, pred)
+            if not result_counts:
+                for pred in preds:
+                    if pred != ABSTAIN_TOKEN and pred:
+                        return pred
+                return ABSTAIN_TOKEN
+            best_key = max(result_counts, key=lambda k: result_counts[k][0])
+            return result_counts[best_key][1]
+
+    return _HFPredictor()
 
 
 # ---------------------------------------------------------------------------
@@ -1012,14 +1147,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--few-shot", default=None, metavar="TRAIN_JSON",
-        help="Path to EHRSQL train.json; enables few-shot retrieval (top-2 similar examples per question)",
+        help="Path to EHRSQL train split; enables few-shot retrieval",
     )
     parser.add_argument(
-        "--retrieval-mode", default="bm25",
+        "--few-shot-k", type=int, default=2, metavar="K",
+        help="Number of few-shot examples to retrieve per question (default: 2)",
+    )
+    parser.add_argument(
+        "--retrieval-mode", default="hybrid",
         choices=["bm25", "embed", "hybrid", "template"],
         help=(
-            "Retrieval mode: bm25 (default), embed (semantic), hybrid (RRF), "
-            "or template (LogReg classifier → 92.7%% recall+precision)"
+            "Retrieval mode: hybrid (default, BM25+embed RRF), bm25, embed, "
+            "or template (medium-label LogReg → cosine within class, ~85-90%% Hit@1 with --retrieval-aug)"
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-aug", default=None, metavar="AUG_DIR",
+        help=(
+            "Path to train_aug split directory. When set, aug examples are added to the retrieval "
+            "corpus (~40K total). Dramatically improves template mode and hybrid diversity."
         ),
     )
     parser.add_argument(
@@ -1028,7 +1174,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--classifier-cache", default=None,
-        help="Path to template LogReg classifier .pkl (default: data/ehrsql/template_classifier.pkl)",
+        help="Path to template LogReg classifier .pkl (default: data/ehrsql2024/mimic_iv/template_classifier_medium[_combined].pkl)",
     )
     parser.add_argument(
         "--num-samples", type=int, default=1,
@@ -1078,9 +1224,11 @@ def main() -> None:
         mode = args.retrieval_mode
         embed_cache = Path(args.embed_cache) if args.embed_cache else None
         clf_cache = Path(args.classifier_cache) if args.classifier_cache else None
+        aug_path = Path(args.retrieval_aug) if args.retrieval_aug else None
         print(f"Building {mode.upper()} few-shot index from: {train_path}")
         few_shot_retriever = build_few_shot_retriever(
-            train_path, mode=mode, embed_cache=embed_cache, classifier_cache=clf_cache,
+            train_path, top_k=args.few_shot_k, mode=mode, embed_cache=embed_cache,
+            classifier_cache=clf_cache, aug_path=aug_path,
         )
         print(f"  {mode.upper()} index built.")
 

@@ -6,10 +6,12 @@
 # Usage:
 #   bash scripts/run_sft_eval.sh [--output PATH] [--split PATH] [--adapter PATH]
 #                                [--repair] [--few-shot] [--retrieval-mode MODE]
+#                                [--retrieval-aug PATH]
 #
 # --repair           enables execution-guided repair loop (up to 3 retries per failed SQL)
-# --few-shot         enables RAG few-shot retrieval (uses --retrieval-mode; default: bm25)
-# --retrieval-mode   bm25 (default) | embed | hybrid  (hybrid = BM25 + semantic RRF)
+# --few-shot         enables RAG few-shot retrieval (uses --retrieval-mode; default: hybrid)
+# --retrieval-mode   hybrid (default) | bm25 | embed | template
+# --retrieval-aug    path to train_aug split; adds ~35K examples to retrieval corpus
 # Default output: tests/evalgen/sft_results.json
 
 set -euo pipefail
@@ -38,11 +40,13 @@ REPAIR_FLAG=""
 FEW_SHOT_FLAG=""
 NUM_SAMPLES_FLAG=""
 RETRIEVAL_MODE_FLAG=""
+RETRIEVAL_AUG_FLAG=""
 CLASSIFIER_CACHE_FLAG=""
 ENTROPY_FLAG=""
 ABSTAIN_EMPTY_FLAG=""
 ABSTAIN_ERROR_FLAG=""
 SAVE_PREDS_FLAG=""
+FEW_SHOT_K_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -51,8 +55,10 @@ while [[ $# -gt 0 ]]; do
         --adapter) ADAPTER="$2"; shift 2 ;;
         --repair) REPAIR_FLAG="--repair"; shift ;;
         --few-shot) FEW_SHOT_FLAG="--few-shot $TRAIN"; shift ;;
+        --few-shot-k) FEW_SHOT_K_FLAG="--few-shot-k $2"; shift 2 ;;
         --num-samples) NUM_SAMPLES_FLAG="--num-samples $2"; shift 2 ;;
         --retrieval-mode) RETRIEVAL_MODE_FLAG="--retrieval-mode $2"; shift 2 ;;
+        --retrieval-aug) RETRIEVAL_AUG_FLAG="--retrieval-aug $2"; shift 2 ;;
         --classifier-cache) CLASSIFIER_CACHE_FLAG="--classifier-cache $2"; shift 2 ;;
         --entropy-threshold) ENTROPY_FLAG="--entropy-threshold $2"; shift 2 ;;
         --abstain-on-empty) ABSTAIN_EMPTY_FLAG="--abstain-on-empty"; shift ;;
@@ -78,7 +84,9 @@ python3 -m ehrcopilot.eval.harness \
     --output "$OUTPUT" \
     $REPAIR_FLAG \
     $FEW_SHOT_FLAG \
+    $FEW_SHOT_K_FLAG \
     $RETRIEVAL_MODE_FLAG \
+    $RETRIEVAL_AUG_FLAG \
     $CLASSIFIER_CACHE_FLAG \
     $NUM_SAMPLES_FLAG \
     $ENTROPY_FLAG \

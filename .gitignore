@@ -260,8 +260,10 @@ checkpoints/
 *.gguf
 *.awq
 
-# EHRSQL raw data (CC-BY; distribute license not data)
+# EHRSQL raw data and MIMIC-IV derived data — never commit (sensitive / distribute separately)
 data/ehrsql/
+data/ehrsql2024/
+data/pairs/
 
 # Environment and secrets
 .env

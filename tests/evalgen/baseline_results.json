@@ -1,8 +1,4 @@
 {
-  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
-  "date": "2026-06-23",
-  "split": "ehrsql/mimic_iii/test.json",
-  "note": "Baseline before SFT+DPO. RS(10) is negative (hallucination penalty outweighs correct answers). Target: beat EHRSQL 2024 leaderboard RS(10)=81.32.",
   "total": 1786,
   "answerable": 1198,
   "unanswerable": 588,

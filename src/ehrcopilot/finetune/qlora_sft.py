@@ -21,6 +21,19 @@ from pathlib import Path
 
 def main() -> None:
     import argparse
+    import os
+
+    # bitsandbytes needs the CUDA 13 nvJitLink library from the nvidia-cu13 package.
+    # Add it to LD_LIBRARY_PATH so the paged_adamw_8bit optimizer can load.
+    _nvidia_cu13 = os.path.expanduser(
+        "~/.local/lib/python3.12/site-packages/nvidia/cu13/lib"
+    )
+    _conda_cu13 = os.path.join(
+        os.path.dirname(os.__file__), "site-packages", "nvidia", "cu13", "lib"
+    )
+    for _p in [_nvidia_cu13, _conda_cu13]:
+        if os.path.isdir(_p) and _p not in os.environ.get("LD_LIBRARY_PATH", ""):
+            os.environ["LD_LIBRARY_PATH"] = _p + ":" + os.environ.get("LD_LIBRARY_PATH", "")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True, help="SFT JSONL data path")
@@ -28,6 +41,8 @@ def main() -> None:
     parser.add_argument("--base-model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max-seq-length", type=int, default=1536)
+    parser.add_argument("--resume-from-checkpoint", default=None,
+                        help="Path to checkpoint dir to resume from (or 'true' for latest)")
     args = parser.parse_args()
 
     # Lazy imports — only loaded when actually training
@@ -109,7 +124,10 @@ def main() -> None:
     )
 
     print("Starting SFT training...")
-    trainer.train()
+    resume = args.resume_from_checkpoint
+    if resume and resume.lower() == "true":
+        resume = True
+    trainer.train(resume_from_checkpoint=resume)
 
     adapter_path = output_dir / "adapter_final"
     print(f"Saving adapter to {adapter_path}")

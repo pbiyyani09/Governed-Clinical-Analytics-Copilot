@@ -1,0 +1,82 @@
+{
+  "relevance": "medium",
+  "corpus": "train+aug (40030 examples)",
+  "label_ceiling": 0.898,
+  "methods": {
+    "bm25": {
+      "Hit@2": 0.5921,
+      "nDCG@2": 0.5541,
+      "MRR": 0.5749,
+      "note": "no reranking"
+    },
+    "embed": {
+      "Hit@2": 0.7163,
+      "nDCG@2": 0.6786,
+      "MRR": 0.7007,
+      "note": "no reranking"
+    },
+    "hybrid": {
+      "Hit@2": 0.7206,
+      "nDCG@2": 0.6835,
+      "MRR": 0.7045,
+      "note": "baseline, best Hit@2"
+    },
+    "template_medium": {
+      "Hit@2": 0.5964,
+      "nDCG@2": 0.5964,
+      "MRR": 0.5964,
+      "note": "LogReg 59.6% accuracy"
+    },
+    "smart_probabilistic": {
+      "Hit@2": 0.5996,
+      "nDCG@2": 0.5992,
+      "MRR": 0.5997,
+      "note": "label_prob * cosine"
+    },
+    "hybrid_msmarco_rerank@100": {
+      "Hit@2": 0.6991,
+      "nDCG@2": 0.6634,
+      "MRR": 0.6842,
+      "note": "WORSE: wrong domain"
+    },
+    "hybrid_msmarco_rerank@500": {
+      "Hit@2": 0.6884,
+      "nDCG@2": 0.6525,
+      "MRR": 0.674,
+      "note": "WORSE"
+    },
+    "hybrid_bge_rerank@20": {
+      "Hit@2": 0.6831,
+      "nDCG@2": 0.6421,
+      "MRR": 0.6611,
+      "note": "WORSE: wrong domain"
+    },
+    "hybrid_prf1@20": {
+      "Hit@2": 0.6916,
+      "nDCG@2": 0.6889,
+      "MRR": 0.69,
+      "note": "top-1 pivot rerank"
+    },
+    "hybrid_prf3@50": {
+      "Hit@2": 0.6906,
+      "nDCG@2": 0.69,
+      "MRR": 0.69,
+      "note": "top-3 vote rerank"
+    }
+  },
+  "recall_first_stage": {
+    "hybrid@2": 0.7206,
+    "hybrid@10": 0.8158,
+    "hybrid@100": 0.8662,
+    "hybrid@500": 0.8812,
+    "hybrid@1000": 0.8887,
+    "medium_label_ceiling": 0.898
+  },
+  "analysis": {
+    "bottleneck": "10.2% of test queries have NO relevant example in 40K corpus (uncoverable)",
+    "correctable": "14.7% have relevant in top-100 but not top-2 (needs SQL-aware reranker)",
+    "best_case_with_perfect_reranker": 0.898,
+    "conclusion": "Without a task-specific trained reranker, hybrid@2 (72.1%) is the ceiling. Cross-encoders trained on web data degrade performance.",
+    "to_reach_90_pct": "Fine-tune bi-encoder with contrastive loss on same-medium-label pairs from EHRSQL train+aug"
+  }
+}

@@ -166,8 +166,8 @@ git clone https://github.com/pbiyyani09/Governed-Clinical-Analytics-Copilot
 cd Governed-Clinical-Analytics-Copilot
 pip install -e ".[eval,agents,dev]"
 
-# 2. Obtain MIMIC-IV data (PhysioNet registration required)
-#    https://physionet.org/content/mimic-iv-ehrsql/
+# 2. Obtain MIMIC-IV Clinical Database Demo (free PhysioNet account required)
+#    https://physionet.org/content/mimic-iv-demo/
 #    Place under data/ehrsql2024/mimic_iv/
 
 # 3. Run guardrail tests (no GPU or data required)
@@ -230,10 +230,14 @@ docs/
 
 ## Data
 
-MIMIC-IV data files are **not included in this repository** per the PhysioNet data use agreement.
-Obtain access at [physionet.org](https://physionet.org/content/mimic-iv-ehrsql/) and place data under
-`data/ehrsql2024/mimic_iv/`. The `.gitignore` permanently blocks all paths under `data/ehrsql2024/`
-and `data/pairs/` from being committed.
+This project uses the **MIMIC-IV Clinical Database Demo** — a freely accessible 94-patient subset
+of MIMIC-IV. It requires only a standard (non-credentialed) PhysioNet account and agreement to the
+data use terms, with no training course or IRB process.
+
+Data files are **not included in this repository** per the PhysioNet DUA. Download the demo at
+[physionet.org/content/mimic-iv-demo](https://physionet.org/content/mimic-iv-demo/) and place it
+under `data/ehrsql2024/mimic_iv/`. The `.gitignore` permanently blocks all paths under
+`data/ehrsql2024/` and `data/pairs/` from being committed.
 
 ---
 
@@ -248,4 +252,4 @@ Outputs must be reviewed by a qualified clinician before any clinical use.
 
 - Source code: [MIT](LICENSES/MIT.txt)
 - EHRSQL dataset: [CC-BY-4.0](LICENSES/CC-BY-4.0.txt)
-- MIMIC-IV: [PhysioNet Credentialed Health Data License](https://physionet.org/content/mimic-iv-ehrsql/)
+- MIMIC-IV Demo: [PhysioNet Data Use Agreement](https://physionet.org/content/mimic-iv-demo/) (standard account, no credentials required)
